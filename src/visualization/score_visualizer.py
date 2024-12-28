@@ -7,23 +7,25 @@ import numpy as np
 from typing import Dict, List
 import colorsys
 import logging
+from collections import deque
+import time
 
 class ScoreVisualizer(QMainWindow):
     # Add signal for audio source change
     audio_source_changed = pyqtSignal(str, str)  # source_type, file_path
     
-    def __init__(self, window_size: int = 100):
+    def __init__(self):
         """Initialize the score visualizer"""
         logging.info("Initializing ScoreVisualizer...")
         super().__init__()
-        self.window_size = window_size
         
-        # Initialize data arrays
+        # Initialize data arrays with deques for unlimited history
         logging.info("Initializing data arrays...")
-        self.timestamps = np.linspace(-window_size, 0, window_size)
-        self.melody_scores = np.zeros(window_size)
-        self.lyric_scores = np.zeros(window_size)
-        self.total_scores = np.zeros(window_size)
+        self.start_time = time.time()
+        self.timestamps = deque()
+        self.melody_scores = deque()
+        self.lyric_scores = deque()
+        self.total_scores = deque()
         
         # Store feedback messages
         self.feedback_history: List[str] = []
@@ -184,14 +186,14 @@ class ScoreVisualizer(QMainWindow):
         
     def update_data(self, scores: Dict[str, float], feedback: str, detailed_metrics: Dict = None):
         """Update the visualization with new data"""
-        # Update score history
-        self.melody_scores = np.roll(self.melody_scores, -1)
-        self.lyric_scores = np.roll(self.lyric_scores, -1)
-        self.total_scores = np.roll(self.total_scores, -1)
+        # Add current time to history
+        current_time = time.time() - self.start_time
+        self.timestamps.append(current_time)
         
-        self.melody_scores[-1] = scores.get('melody', 0)
-        self.lyric_scores[-1] = scores.get('lyrics', 0)
-        self.total_scores[-1] = scores.get('total', 0)
+        # Add new scores
+        self.melody_scores.append(scores.get('melody', 0))
+        self.lyric_scores.append(scores.get('lyrics', 0))
+        self.total_scores.append(scores.get('total', 0))
         
         # Update labels
         self.total_score_label.setText(f"Total Score: {scores.get('total', 0):.1f}")
@@ -204,23 +206,32 @@ class ScoreVisualizer(QMainWindow):
                 if metric in self.metrics_widgets:
                     self.metrics_widgets[metric]['progress'].setValue(int(value))
                     self.metrics_widgets[metric]['value'].setText(f"{value:.1f}%")
-        
+                    
         # Add feedback to history
         if feedback:
-            self.feedback_history.append(feedback)
-            self.feedback_table.setRowCount(len(self.feedback_history))
-            self.feedback_table.setItem(
-                len(self.feedback_history)-1, 
-                0, 
-                QTableWidgetItem(feedback)
-            )
+            row = self.feedback_table.rowCount()
+            self.feedback_table.insertRow(row)
+            self.feedback_table.setItem(row, 0, QTableWidgetItem(feedback))
             self.feedback_table.scrollToBottom()
             
     def update_plots(self):
         """Update the plot lines"""
-        self.total_line.setData(self.timestamps, self.total_scores)
-        self.melody_line.setData(self.timestamps, self.melody_scores)
-        self.lyric_line.setData(self.timestamps, self.lyric_scores)
+        if not self.timestamps:
+            return
+            
+        # Convert deques to numpy arrays for plotting
+        timestamps = np.array(self.timestamps)
+        total_scores = np.array(self.total_scores)
+        melody_scores = np.array(self.melody_scores)
+        lyric_scores = np.array(self.lyric_scores)
+        
+        # Update plot range
+        self.score_plot.setXRange(0, max(timestamps))
+        
+        # Update plot lines
+        self.total_line.setData(timestamps, total_scores)
+        self.melody_line.setData(timestamps, melody_scores)
+        self.lyric_line.setData(timestamps, lyric_scores)
         
     def _on_source_changed(self, source: str):
         """Handle audio source selection change"""
