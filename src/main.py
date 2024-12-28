@@ -62,6 +62,12 @@ class SingingScorer:
         self.audio_meter = AudioMeterWindow()
         self.audio_meter.add_callback(self.process_audio_chunk)
         
+        # Initialize audio processing
+        logging.info("Initializing audio processing...")
+        self.audio_queue = queue.Queue()
+        self.should_stop = False
+        self.last_score_time = time.time()
+        
         # Initialize components
         logging.info("Initializing audio feature extractor...")
         self.feature_extractor = AudioFeatureExtractor()
@@ -186,12 +192,6 @@ class SingingScorer:
     def start_scoring(self):
         """Start real-time scoring"""
         try:
-            # Initialize audio processing
-            logging.info("Starting audio processing...")
-            self.audio_queue = queue.Queue()
-            self.should_stop = False
-            self.last_score_time = time.time()
-            
             # Show the window and start Qt event loop
             logging.info("Starting Qt event loop...")
             self.app.exec()
@@ -315,7 +315,6 @@ class SingingScorer:
         self.frame_size = int(self.sample_rate * self.frame_duration)
         self.buffer_size = int(self.sample_rate * self.buffer_duration)
         self.audio_buffer = np.zeros(self.buffer_size)
-        self.audio_queue = queue.Queue()
         self.gain = 1.0
         self.current_device = None
         self.stream = None
