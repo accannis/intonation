@@ -1,0 +1,3 @@
+[submodule "pyaudiosource"]
+	path = pyaudiosource
+	url = git@github.com:accannis/pyaudiosource.git
