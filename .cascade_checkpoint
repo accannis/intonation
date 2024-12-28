@@ -1,0 +1,31 @@
+CHECKPOINT 4
+
+Current Task: Optimizing Vocal Separation System
+We are implementing caching for both lyrics and vocal separation to improve performance.
+
+Progress:
+1. Implemented lyrics caching:
+   - Stores lyrics in cache/lyrics directory
+   - Uses MD5 hash of audio file as key
+   - Successfully loads cached lyrics on subsequent runs
+
+2. Implementing vocal separation caching:
+   - Stores separated vocals in cache/vocals directory
+   - Uses MD5 hash of audio file as key
+   - Just simplified code to save directly to cache location
+   - Currently testing if caching works properly
+
+Next Steps:
+1. Test if vocal separation caching works after restart
+2. Clean up any temporary directories
+3. Consider adding cache cleanup/management features
+
+File Changes:
+1. Updated src/lyric_matching/lyric_provider.py with caching
+2. Updated src/preprocessing/vocal_separator.py with direct cache saving
+3. Modified src/main.py to work with cached lyrics
+
+Current State:
+- Lyrics caching is working properly
+- Vocal separation caching implementation is complete but needs testing
+- Program was running when we paused
