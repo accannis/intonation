@@ -1,253 +1,190 @@
+"""
+Visualization window for displaying scores and performance metrics
+"""
+
+from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+                           QLabel, QTextEdit, QSizePolicy)
+from PyQt6.QtCore import Qt, QTimer
 import pyqtgraph as pg
-from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, 
-                           QHBoxLayout, QLabel, QProgressBar, QTabWidget, QTableWidget, QTableWidgetItem,
-                           QComboBox, QPushButton, QFileDialog)
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 import numpy as np
-from typing import Dict, List
-import colorsys
 import logging
 from collections import deque
-import time
+
+# Configure pyqtgraph
+pg.setConfigOption('background', 'w')
+pg.setConfigOption('foreground', 'k')
 
 class ScoreVisualizer(QMainWindow):
-    # Add signal for audio source change
-    audio_source_changed = pyqtSignal(str, str)  # source_type, file_path
-    
-    def __init__(self):
-        """Initialize the score visualizer"""
-        logging.info("Initializing ScoreVisualizer...")
-        super().__init__()
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Session")
+        self.setGeometry(100, 100, 800, 900)
         
-        # Initialize data arrays with deques for unlimited history
-        logging.info("Initializing data arrays...")
-        self.start_time = time.time()
-        self.timestamps = deque()
-        self.melody_scores = deque()
-        self.lyric_scores = deque()
-        self.total_scores = deque()
+        # Initialize data storage
+        self.start_time = None
+        self.timestamps = []
+        self.melody_scores = []
+        self.phonetic_scores = []
+        self.total_scores = []
+        self.waveform_data = []
+        self.waveform_times = []
         
-        # Store feedback messages
-        self.feedback_history: List[str] = []
+        # Create central widget and layout
+        central = QWidget()
+        self.setCentralWidget(central)
+        main_layout = QVBoxLayout(central)
         
-        # Setup UI components
-        logging.info("Setting up UI components...")
-        self.setup_ui()
+        # Create score labels
+        scores_layout = QHBoxLayout()
         
-        # Update timer
-        logging.info("Setting up update timer...")
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.update_plots)
-        self.timer.start(50)  # 50ms refresh rate
+        self.total_score_label = QLabel("Total Score: 0.0")
+        self.total_score_label.setStyleSheet("font-size: 24pt; font-weight: bold; color: #2c3e50;")
+        scores_layout.addWidget(self.total_score_label)
         
-        logging.info("ScoreVisualizer initialization complete")
+        self.melody_score_label = QLabel("Melody Score: 0.0")
+        self.melody_score_label.setStyleSheet("font-size: 24pt; font-weight: bold; color: #e74c3c;")
+        scores_layout.addWidget(self.melody_score_label)
         
-    def setup_ui(self):
-        """Initialize the UI components"""
-        self.setWindowTitle("Singing Score Visualization")
-        self.setGeometry(100, 100, 1200, 800)
+        self.phonetic_score_label = QLabel("Phonetic Score: 0.0")
+        self.phonetic_score_label.setStyleSheet("font-size: 24pt; font-weight: bold; color: #2980b9;")
+        scores_layout.addWidget(self.phonetic_score_label)
         
-        # Create main widget and layout
-        main_widget = QWidget()
-        self.setCentralWidget(main_widget)
-        layout = QVBoxLayout(main_widget)
+        main_layout.addLayout(scores_layout)
         
-        # Add audio source selector
-        source_layout = QHBoxLayout()
-        source_layout.addWidget(QLabel("Audio Source:"))
+        # Create plots with consistent styling
+        self.waveform_plot = self._create_plot("Audio Waveform", "Time (s)", "Amplitude")
+        self.total_plot = self._create_plot("Total Score", "Time (s)", "Score")
+        self.melody_plot = self._create_plot("Melody Score", "Time (s)", "Score")
+        self.phonetic_plot = self._create_plot("Phonetic Score", "Time (s)", "Score")
         
-        self.source_selector = QComboBox()
-        self.source_selector.addItems(["Audio Input", "Audio File"])
-        self.source_selector.currentTextChanged.connect(self._on_source_changed)
-        source_layout.addWidget(self.source_selector)
+        # Add plots to layout with size policies
+        for plot in [self.waveform_plot, self.total_plot, self.melody_plot, self.phonetic_plot]:
+            plot.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            main_layout.addWidget(plot)
         
-        self.file_button = QPushButton("Select File...")
-        self.file_button.clicked.connect(self._on_file_button_clicked)
-        self.file_button.setVisible(False)
-        source_layout.addWidget(self.file_button)
+        # Give waveform more height
+        self.waveform_plot.setMinimumHeight(200)
         
-        source_layout.addStretch()
-        layout.addLayout(source_layout)
+        # Create feedback display
+        self.feedback_label = QLabel("Feedback:")
+        self.feedback_label.setStyleSheet("font-size: 16pt; font-weight: bold; color: #34495e;")
+        main_layout.addWidget(self.feedback_label)
         
-        # Create tabs for different views
-        self.tabs = QTabWidget()
-        
-        # Main scoring tab
-        scoring_tab = QWidget()
-        scoring_layout = QVBoxLayout(scoring_tab)
-        
-        # Create score indicators
-        score_layout = QHBoxLayout()
-        
-        # Total score
-        self.total_score_label = QLabel("Total Score: 0")
-        self.total_score_label.setStyleSheet(
-            "QLabel { font-size: 24pt; font-weight: bold; }"
-        )
-        score_layout.addWidget(self.total_score_label)
-        
-        # Melody score
-        self.melody_score_label = QLabel("Melody Score: 0")
-        self.melody_score_label.setStyleSheet(
-            "QLabel { font-size: 24pt; font-weight: bold; }"
-        )
-        score_layout.addWidget(self.melody_score_label)
-        
-        # Lyrics score
-        self.lyrics_score_label = QLabel("Lyrics Score: 0")
-        self.lyrics_score_label.setStyleSheet(
-            "QLabel { font-size: 24pt; font-weight: bold; }"
-        )
-        score_layout.addWidget(self.lyrics_score_label)
-        
-        scoring_layout.addLayout(score_layout)
-        
-        # Create progress bars with labels
-        progress_layout = QVBoxLayout()
-        metrics_layout = QHBoxLayout()
-        
-        # Create detailed metrics widgets
-        self.metrics_widgets = {}
-        for metric in ['Pitch Accuracy', 'Rhythm', 'Pronunciation', 'Breath Control']:
-            widget = QWidget()
-            metric_layout = QVBoxLayout(widget)
-            
-            label = QLabel(metric)
-            progress = self._create_progress_bar()
-            value_label = QLabel("0%")
-            value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            
-            metric_layout.addWidget(label)
-            metric_layout.addWidget(progress)
-            metric_layout.addWidget(value_label)
-            
-            self.metrics_widgets[metric] = {
-                'progress': progress,
-                'value': value_label
+        self.feedback_display = QTextEdit()
+        self.feedback_display.setReadOnly(True)
+        self.feedback_display.setMaximumHeight(100)
+        self.feedback_display.setStyleSheet("""
+            QTextEdit {
+                font-size: 14pt;
+                background-color: #f8f9fa;
+                border: 2px solid #dee2e6;
+                border-radius: 8px;
+                padding: 10px;
+                color: #212529;
             }
-            
-            metrics_layout.addWidget(widget)
+        """)
+        main_layout.addWidget(self.feedback_display)
         
-        progress_layout.addLayout(metrics_layout)
-        scoring_layout.addLayout(progress_layout)
+        # Create plot curves with consistent colors
+        self.waveform_curve = self.waveform_plot.plot(pen=pg.mkPen(color='b', width=1))
+        self.total_curve = self.total_plot.plot(pen=pg.mkPen(color='r', width=2))
+        self.melody_curve = self.melody_plot.plot(pen=pg.mkPen(color='g', width=2))
+        self.phonetic_curve = self.phonetic_plot.plot(pen=pg.mkPen(color='b', width=2))
         
-        # Create plots
-        plots_layout = QHBoxLayout()
+        # Start update timer
+        self.update_timer = QTimer()
+        self.update_timer.timeout.connect(self.update_plots)
+        self.update_timer.start(50)  # Update every 50ms
         
-        # Score history plot
-        self.score_plot = pg.PlotWidget()
-        self.score_plot.setBackground('w')
-        self.score_plot.setTitle("Score History", color='k')
-        self.score_plot.setLabel('left', 'Score', color='k')
-        self.score_plot.setLabel('bottom', 'Time (s)', color='k')
-        self.score_plot.setYRange(0, 100)
-        self.score_plot.showGrid(x=True, y=True)
+    def _create_plot(self, title, x_label, y_label):
+        """Create a pyqtgraph plot with consistent styling"""
+        plot = pg.PlotWidget()
+        plot.setBackground('w')
+        plot.setTitle(title, color='k', size='12pt')
+        plot.setLabel('left', y_label, color='k')
+        plot.setLabel('bottom', x_label, color='k')
+        plot.showGrid(x=True, y=True)
         
-        # Create plot lines
-        self.total_line = self.score_plot.plot(pen=pg.mkPen(color='b', width=2))
-        self.melody_line = self.score_plot.plot(pen=pg.mkPen(color='g', width=2))
-        self.lyric_line = self.score_plot.plot(pen=pg.mkPen(color='r', width=2))
+        # Style the axes
+        plot.getAxis('bottom').setPen(pg.mkPen(color='k', width=1))
+        plot.getAxis('left').setPen(pg.mkPen(color='k', width=1))
+        plot.getAxis('bottom').setTextPen(pg.mkPen(color='k'))
+        plot.getAxis('left').setTextPen(pg.mkPen(color='k'))
         
-        plots_layout.addWidget(self.score_plot)
-        scoring_layout.addLayout(plots_layout)
-        
-        # Add feedback history
-        self.feedback_table = QTableWidget()
-        self.feedback_table.setColumnCount(1)
-        self.feedback_table.setHorizontalHeaderLabels(["Feedback"])
-        self.feedback_table.horizontalHeader().setStretchLastSection(True)
-        scoring_layout.addWidget(self.feedback_table)
-        
-        self.tabs.addTab(scoring_tab, "Scoring")
-        layout.addWidget(self.tabs)
-        
-    def show(self):
-        """Show the window"""
-        super().show()
-        
-    def _create_progress_bar(self):
-        """Create a styled progress bar"""
-        progress = QProgressBar()
-        progress.setMinimum(0)
-        progress.setMaximum(100)
-        progress.setTextVisible(True)
-        progress.setFormat("%v%")
-        return progress
-        
-    def _get_color_for_score(self, score: float):
-        """Get color based on score value"""
-        if score < 0 or score > 100:
-            return QColor(128, 128, 128)  # Gray for invalid scores
-            
-        # Use HSV color space: red (0) for low scores, green (120) for high scores
-        hue = score * 1.2  # 120 degrees = green
-        rgb = colorsys.hsv_to_rgb(hue/360, 1.0, 1.0)
-        return QColor(int(rgb[0]*255), int(rgb[1]*255), int(rgb[2]*255))
-        
-    def update_data(self, scores: Dict[str, float], feedback: str, detailed_metrics: Dict = None):
-        """Update the visualization with new data"""
-        # Add current time to history
-        current_time = time.time() - self.start_time
-        self.timestamps.append(current_time)
-        
-        # Add new scores
-        self.melody_scores.append(scores.get('melody', 0))
-        self.lyric_scores.append(scores.get('lyrics', 0))
-        self.total_scores.append(scores.get('total', 0))
-        
-        # Update labels
-        self.total_score_label.setText(f"Total Score: {scores.get('total', 0):.1f}")
-        self.melody_score_label.setText(f"Melody Score: {scores.get('melody', 0):.1f}")
-        self.lyrics_score_label.setText(f"Lyrics Score: {scores.get('lyrics', 0):.1f}")
-        
-        # Update detailed metrics
-        if detailed_metrics:
-            for metric, value in detailed_metrics.items():
-                if metric in self.metrics_widgets:
-                    self.metrics_widgets[metric]['progress'].setValue(int(value))
-                    self.metrics_widgets[metric]['value'].setText(f"{value:.1f}%")
-                    
-        # Add feedback to history
-        if feedback:
-            row = self.feedback_table.rowCount()
-            self.feedback_table.insertRow(row)
-            self.feedback_table.setItem(row, 0, QTableWidgetItem(feedback))
-            self.feedback_table.scrollToBottom()
-            
-    def update_plots(self):
-        """Update the plot lines"""
-        if not self.timestamps:
-            return
-            
-        # Convert deques to numpy arrays for plotting
-        timestamps = np.array(self.timestamps)
-        total_scores = np.array(self.total_scores)
-        melody_scores = np.array(self.melody_scores)
-        lyric_scores = np.array(self.lyric_scores)
-        
-        # Update plot range
-        self.score_plot.setXRange(0, max(timestamps))
-        
-        # Update plot lines
-        self.total_line.setData(timestamps, total_scores)
-        self.melody_line.setData(timestamps, melody_scores)
-        self.lyric_line.setData(timestamps, lyric_scores)
-        
-    def _on_source_changed(self, source: str):
-        """Handle audio source selection change"""
-        if source == "Audio Input":
-            self.file_button.setVisible(False)
-            self.audio_source_changed.emit("input", "")
+        # Set y-axis range
+        if 'Score' in y_label:
+            plot.setYRange(0, 100)
         else:
-            self.file_button.setVisible(True)
+            plot.setYRange(-1, 1)  # For waveform
             
-    def _on_file_button_clicked(self):
-        """Handle file selection"""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Audio File",
-            "",
-            "WAV Files (*.wav)"
-        )
-        if file_path:
-            self.audio_source_changed.emit("file", file_path)
+        return plot
+        
+    def update_plots(self):
+        """Update all plots to show entire session duration"""
+        try:
+            if not self.timestamps or self.start_time is None:
+                return
+                
+            # Calculate relative times from session start
+            rel_times = [t - self.start_time for t in self.timestamps]
+            rel_waveform_times = [t - self.start_time for t in self.waveform_times]
+            
+            # Update all plots to show entire session
+            duration = rel_times[-1]
+            for plot in [self.waveform_plot, self.total_plot, self.melody_plot, self.phonetic_plot]:
+                plot.setXRange(0, duration)
+                
+            # Update curves with relative times
+            self.total_curve.setData(rel_times, self.total_scores)
+            self.melody_curve.setData(rel_times, self.melody_scores)
+            self.phonetic_curve.setData(rel_times, self.phonetic_scores)
+            self.waveform_curve.setData(rel_waveform_times, self.waveform_data)
+                
+        except Exception as e:
+            logging.error(f"Error updating plots: {e}")
+            logging.exception("Full traceback:")
+            
+    def update_display(self, features, timestamp, audio_data=None):
+        """Update display with new data"""
+        try:
+            if not features or 'total_score' not in features:
+                return
+                
+            # Initialize start time if not set
+            if self.start_time is None:
+                self.start_time = timestamp
+                
+            # Update scores
+            melody_score = features.get('melody_score', 0)
+            phonetic_score = features.get('phonetic_score', 0)
+            total_score = features.get('total_score', 0)
+            
+            # Update labels
+            self.melody_score_label.setText(f"Melody Score: {melody_score:.1f}")
+            self.phonetic_score_label.setText(f"Phonetic Score: {phonetic_score:.1f}")
+            self.total_score_label.setText(f"Total Score: {total_score:.1f}")
+            
+            # Store scores
+            self.timestamps.append(timestamp)
+            self.melody_scores.append(melody_score)
+            self.phonetic_scores.append(phonetic_score)
+            self.total_scores.append(total_score)
+            
+            # Update waveform data if provided
+            if audio_data is not None:
+                # Create time points for new audio data
+                sample_rate = 44100
+                num_samples = len(audio_data)
+                new_times = np.linspace(timestamp, timestamp + num_samples/sample_rate, num_samples)
+                
+                # Add new data points
+                self.waveform_data.extend(audio_data.tolist())
+                self.waveform_times.extend(new_times.tolist())
+            
+            # Update feedback if available
+            if 'feedback' in features:
+                self.feedback_display.setText(features['feedback'])
+                
+        except Exception as e:
+            logging.error(f"Error updating display: {e}")
+            logging.exception("Full traceback:")

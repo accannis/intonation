@@ -1,11 +1,25 @@
 import numpy as np
 from dtaidistance import dtw
-from typing import Tuple, List
+from typing import Tuple, List, Dict, Optional
 import logging
+import librosa
 
 class MelodyMatcher:
     def __init__(self, window_size: int = None):
         self.window_size = window_size
+        self.reference_features = None
+        self.reference_pitch = None
+        
+    def set_reference(self, features: Dict[str, np.ndarray]):
+        """Set reference features for comparison"""
+        try:
+            self.reference_features = features
+            if 'pitch' in features:
+                self.reference_pitch = self.normalize_pitch_sequence(features['pitch'])
+            logging.info("Reference features set for melody matching")
+        except Exception as e:
+            logging.error(f"Error setting reference features: {e}")
+            logging.exception("Full traceback:")
     
     def normalize_pitch_sequence(self, pitch_sequence: np.ndarray, reference_pitch: float = None) -> np.ndarray:
         """
@@ -56,4 +70,28 @@ class MelodyMatcher:
             
         except Exception as e:
             logging.error(f"Error computing DTW distance: {str(e)}")
+            return 0.0
+
+    def calculate_score(self, features: Optional[Dict[str, np.ndarray]]) -> float:
+        """Calculate melody score by comparing with reference"""
+        try:
+            if features is None or self.reference_pitch is None:
+                return 0.0
+                
+            if 'pitch' not in features:
+                return 0.0
+                
+            # Normalize performance pitch
+            performance_pitch = self.normalize_pitch_sequence(features['pitch'])
+            
+            # Compute similarity
+            similarity = self.compute_melody_similarity(self.reference_pitch, performance_pitch)
+            
+            # Convert to score (0-100)
+            score = similarity * 100.0
+            
+            return score
+            
+        except Exception as e:
+            logging.error(f"Error calculating melody score: {e}")
             return 0.0
