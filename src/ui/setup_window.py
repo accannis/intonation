@@ -3,6 +3,7 @@ Setup window for configuring scoring session
 """
 
 import os
+import json
 import logging
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                            QLabel, QComboBox, QPushButton, QFileDialog, QMessageBox)
@@ -15,6 +16,10 @@ class SetupWindow(QMainWindow):
     def __init__(self, session_manager):
         super().__init__()
         self.session_manager = session_manager
+        
+        # Load settings
+        self.settings_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'setup_settings.json')
+        self.settings = self._load_settings()
         
         self.setWindowTitle("Session Setup")
         self.setGeometry(100, 100, 600, 200)
@@ -77,31 +82,99 @@ class SetupWindow(QMainWindow):
         self.reference_file: Optional[str] = None
         self.input_file: Optional[str] = None
         
+        # Restore previous settings
+        self._restore_settings()
+        
+    def _load_settings(self) -> Dict:
+        """Load settings from file
+        
+        Returns:
+            Dict of settings, empty if file not found or error
+        """
+        try:
+            if os.path.exists(self.settings_file):
+                with open(self.settings_file, 'r') as f:
+                    return json.load(f)
+        except Exception as e:
+            logging.error(f"Error loading settings: {e}")
+            logging.exception("Full traceback:")
+        return {}
+        
+    def _save_settings(self):
+        """Save current settings to file"""
+        try:
+            # Create config directory if it doesn't exist
+            os.makedirs(os.path.dirname(self.settings_file), exist_ok=True)
+            
+            settings = {
+                'reference_file': self.reference_file,
+                'input_source': self.input_combo.currentText(),
+                'input_file': self.input_file
+            }
+            
+            with open(self.settings_file, 'w') as f:
+                json.dump(settings, f)
+                
+        except Exception as e:
+            logging.error(f"Error saving settings: {e}")
+            logging.exception("Full traceback:")
+            
+    def _restore_settings(self):
+        """Restore settings from saved state"""
+        try:
+            # Restore reference file
+            if 'reference_file' in self.settings and os.path.exists(self.settings['reference_file']):
+                self.reference_file = self.settings['reference_file']
+                self.ref_path.setText(os.path.basename(self.reference_file))
+            
+            # Restore input source
+            if 'input_source' in self.settings:
+                index = self.input_combo.findText(self.settings['input_source'])
+                if index >= 0:
+                    self.input_combo.setCurrentIndex(index)
+            
+            # Restore input file
+            if 'input_file' in self.settings and os.path.exists(self.settings['input_file']):
+                self.input_file = self.settings['input_file']
+                self.file_path.setText(os.path.basename(self.input_file))
+            
+            # Update UI state
+            self._on_input_changed(self.input_combo.currentText())
+            self._update_start_button()
+            
+        except Exception as e:
+            logging.error(f"Error restoring settings: {e}")
+            logging.exception("Full traceback:")
+        
     def _browse_reference(self):
         """Browse for reference audio file"""
+        start_dir = os.path.dirname(self.reference_file) if self.reference_file else ""
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Select Reference Audio",
-            "",
+            start_dir,
             "Audio Files (*.wav *.mp3);;All Files (*.*)"
         )
         if file_path:
             self.reference_file = file_path
             self.ref_path.setText(os.path.basename(file_path))
             self._update_start_button()
+            self._save_settings()
             
     def _browse_input(self):
         """Browse for input audio file"""
+        start_dir = os.path.dirname(self.input_file) if self.input_file else ""
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Select Input Audio",
-            "",
+            start_dir,
             "Audio Files (*.wav *.mp3);;All Files (*.*)"
         )
         if file_path:
             self.input_file = file_path
             self.file_path.setText(os.path.basename(file_path))
             self._update_start_button()
+            self._save_settings()
             
     def _on_input_changed(self, text: str):
         """Handle input source change"""
@@ -112,6 +185,7 @@ class SetupWindow(QMainWindow):
         if not is_file:
             self.input_file = None
         self._update_start_button()
+        self._save_settings()
         
     def _update_start_button(self):
         """Update start button enabled state"""
