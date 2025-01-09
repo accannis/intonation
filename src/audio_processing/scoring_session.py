@@ -74,9 +74,16 @@ class ScoringSession:
             
             # Handle input based on source
             if self.input_source == 'microphone':
+                # For microphone input, initialize visualizer with a default duration
+                # that will expand as needed
+                self.visualizer.initialize(duration=30.0)  # Start with 30 seconds
                 self.input_processor.start_input()
             else:
-                # For file input, process everything at once
+                # For file input, get input file duration
+                sample_rate, input_duration = self.input_processor.get_audio_info(self.input_file)
+                self.visualizer.initialize(duration=input_duration)
+                
+                # Process entire input file
                 self._process_input_file()
                 # Start playback for user feedback
                 self.input_processor.start_playback()
@@ -95,18 +102,11 @@ class ScoringSession:
             if self.reference_features is None:
                 raise RuntimeError("Failed to extract features from reference audio")
                 
-            # Get duration from audio file metadata without loading the entire file
-            sample_rate, duration = self.reference_processor.get_audio_info(self.reference_file)
-            
-            # Initialize visualizer with reference duration
-            self.visualizer.initialize(duration)
-            
             logging.info(
                 f"Reference features extracted: "
                 f"path={self.reference_file}, "
                 f"melody shape={self.reference_features['melody'].shape}, "
-                f"phonetic shape={self.reference_features['phonetic'].shape}, "
-                f"duration={duration:.2f}s"
+                f"phonetic shape={self.reference_features['phonetic'].shape}"
             )
             
         except Exception as e:
@@ -153,26 +153,31 @@ class ScoringSession:
         """Process extracted features"""
         try:
             # Match melody
-            melody_score = self.melody_matcher.match_melody(
-                features['melody'],
-                self.reference_features['melody']
+            melody_scores, melody_times = self.melody_matcher.match(
+                self.reference_features['melody'],
+                features['melody']
             )
             
             # Match phonetics
-            phonetic_score = self.phonetic_matcher.match_phonetics(
-                features['phonetic'],
-                self.reference_features['phonetic']
+            phonetic_scores, phonetic_times = self.phonetic_matcher.match(
+                self.reference_features['phonetic'],
+                features['phonetic']
             )
             
-            # Calculate overall score
-            overall_score = self.score_calculator.calculate_score(melody_score, phonetic_score)
+            # Calculate current scores (using the last values)
+            current_melody_score = melody_scores[-1] if len(melody_scores) > 0 else 0.0
+            current_phonetic_score = phonetic_scores[-1] if len(phonetic_scores) > 0 else 0.0
+            current_total_score = self.score_calculator.calculate_total_score(
+                melody_score=current_melody_score,
+                phonetic_score=current_phonetic_score
+            )
             
             # Update visualization
-            self.visualizer.update(
+            self.visualizer.update_scores(
                 waveform=features['waveform'],
-                melody_score=melody_score,
-                phonetic_score=phonetic_score,
-                overall_score=overall_score,
+                melody_score=current_melody_score,
+                phonetic_score=current_phonetic_score,
+                total_score=current_total_score,
                 duration=duration,
                 timestamp=timestamp
             )

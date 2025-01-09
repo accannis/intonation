@@ -34,59 +34,52 @@ class MelodyMatcher:
             reference_melody = reference_melody.flatten()
             input_melody = input_melody.flatten()
             
+            # Handle empty arrays
+            if len(reference_melody) == 0 or len(input_melody) == 0:
+                return [0.0], [0.0]
+            
             # Normalize pitch values to 0-1 range
             ref_min, ref_max = np.min(reference_melody), np.max(reference_melody)
             input_min, input_max = np.min(input_melody), np.max(input_melody)
             
-            ref_norm = (reference_melody - ref_min) / (ref_max - ref_min)
-            input_norm = (input_melody - input_min) / (input_max - input_min)
+            # Handle constant values
+            if ref_max == ref_min:
+                ref_norm = np.zeros_like(reference_melody)
+            else:
+                ref_norm = (reference_melody - ref_min) / (ref_max - ref_min)
+                
+            if input_max == input_min:
+                input_norm = np.zeros_like(input_melody)
+            else:
+                input_norm = (input_melody - input_min) / (input_max - input_min)
             
             # Calculate window size in samples
-            samples_per_second = len(input_melody) / len(reference_melody)
-            window_samples = int(self.window_size * samples_per_second)
+            window_samples = max(int(len(input_melody) * self.window_size), 1)
+            step_size = max(window_samples // 2, 1)
             
             # Initialize lists for scores and times
             scores = []
             times = []
             
             # Slide window over input melody
-            for i in range(0, len(input_norm) - window_samples, window_samples // 2):
-                # Get current window
+            for i in range(0, len(input_norm) - window_samples, step_size):
                 window = input_norm[i:i + window_samples]
                 
                 # Calculate DTW distance
-                distance = dtw.distance(
-                    ref_norm.astype(np.float64),
-                    window.astype(np.float64)
-                )
+                distance = dtw.distance(ref_norm, window)
                 
                 # Convert distance to similarity score (0-100)
-                # DTW distance is unbounded, so we use an exponential transform
-                score = 100 * np.exp(-distance)
-                
-                # Calculate time point for this window
-                time = i / samples_per_second
+                max_distance = np.sqrt(len(ref_norm))  # Maximum possible DTW distance
+                score = max(0, 100 * (1 - distance / max_distance))
                 
                 scores.append(score)
-                times.append(time)
+                times.append(i / len(input_norm))  # Normalize time to 0-1 range
             
-            # Convert to numpy arrays
-            scores = np.array(scores)
-            times = np.array(times)
-            
-            # Ensure we have at least one score
-            if len(scores) == 0:
-                scores = np.array([0.0])
-                times = np.array([0.0])
-            
-            logging.info(
-                f"Melody matching complete - "
-                f"Windows: {len(scores)}, "
-                f"Duration: {times[-1]:.1f}s, "
-                f"Mean score: {np.mean(scores):.1f}"
-            )
-            
-            return scores.tolist(), times.tolist()
+            # If no scores were calculated, return default
+            if not scores:
+                return [0.0], [0.0]
+                
+            return scores, times
             
         except Exception as e:
             logging.error(f"Error matching melodies: {e}")

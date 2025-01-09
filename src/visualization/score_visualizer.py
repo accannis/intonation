@@ -24,14 +24,12 @@ class ScoreVisualizer(QMainWindow):
         
         # Initialize data storage
         self.duration = None
-        self.melody_scores = None
-        self.melody_times = None
-        self.phonetic_scores = None
-        self.phonetic_times = None
-        self.total_scores = None
-        self.total_times = None
-        self.waveform_data = None
-        self.waveform_times = None
+        self.melody_scores = deque(maxlen=1000)
+        self.melody_times = deque(maxlen=1000)
+        self.phonetic_scores = deque(maxlen=1000)
+        self.phonetic_times = deque(maxlen=1000)
+        self.total_scores = deque(maxlen=1000)
+        self.total_times = deque(maxlen=1000)
         
         # Create central widget and layout
         central = QWidget()
@@ -106,15 +104,8 @@ class ScoreVisualizer(QMainWindow):
         
         logging.info(f"Visualizer initialized with duration: {duration:.2f}s")
         
-    def update_scores(self, 
-                     total_score: float,
-                     melody_score: float,
-                     phonetic_score: float,
-                     waveform: np.ndarray,
-                     melody_scores: Optional[List[float]] = None,
-                     melody_times: Optional[List[float]] = None,
-                     phonetic_scores: Optional[List[float]] = None,
-                     phonetic_times: Optional[List[float]] = None):
+    def update_scores(self, total_score: float, melody_score: float, phonetic_score: float, 
+                     waveform: np.ndarray, duration: float, timestamp: float = 0):
         """Update all visualization elements with new scores
         
         Args:
@@ -122,92 +113,41 @@ class ScoreVisualizer(QMainWindow):
             melody_score: Current melody matching score (0-100)
             phonetic_score: Current phonetic matching score (0-100)
             waveform: Audio waveform data
-            melody_scores: List of melody scores over time
-            melody_times: List of time points for melody scores
-            phonetic_scores: List of phonetic scores over time
-            phonetic_times: List of time points for phonetic scores
+            duration: Duration of the current audio chunk
+            timestamp: Time offset for this chunk
         """
         try:
-            # Update score labels with current scores
+            # Update score labels
             self.total_score_label.setText(f"Total Score: {total_score:.1f}")
             self.melody_score_label.setText(f"Melody Score: {melody_score:.1f}")
             self.phonetic_score_label.setText(f"Phonetic Score: {phonetic_score:.1f}")
             
-            # Generate time points for the waveform
-            if self.duration is not None:
-                # Create time points for original waveform
-                original_times = np.linspace(0, self.duration, len(waveform))
-                
-                # Create time points for display (use window width)
-                display_points = self.waveform_plot.width()
-                display_times = np.linspace(0, self.duration, display_points)
-                
-                # Resample waveform to match display points
-                # Use max of absolute values to preserve peaks
-                points_per_pixel = len(waveform) // display_points
-                if points_per_pixel > 1:
-                    # Reshape to get chunks for each pixel
-                    n_chunks = display_points * points_per_pixel
-                    chunks = waveform[:n_chunks].reshape(display_points, points_per_pixel)
-                    display_waveform = np.max(np.abs(chunks), axis=1) * np.sign(np.mean(chunks, axis=1))
-                else:
-                    # If we have fewer points than pixels, interpolate
-                    interp_func = interp1d(original_times, waveform, kind='linear')
-                    display_waveform = interp_func(display_times)
-                
-                # Update waveform plot
-                self.waveform_curve.setData(display_times, display_waveform)
-                
-                # Update melody score plot if we have time series data
-                if melody_scores is not None and melody_times is not None and len(melody_scores) > 0:
-                    self.melody_scores = np.array(melody_scores)
-                    self.melody_times = np.array(melody_times)
-                    self.melody_score_curve.setData(self.melody_times, self.melody_scores)
-                    logging.info(f"Updated melody plot with {len(melody_scores)} points")
-                
-                # Update phonetic score plot if we have time series data
-                if phonetic_scores is not None and phonetic_times is not None and len(phonetic_scores) > 0:
-                    self.phonetic_scores = np.array(phonetic_scores)
-                    self.phonetic_times = np.array(phonetic_times)
-                    self.phonetic_score_curve.setData(self.phonetic_times, self.phonetic_scores)
-                    logging.info(f"Updated phonetic plot with {len(phonetic_scores)} points")
-                
-                # Update total score plot
-                # If we have both melody and phonetic time series, interpolate to get total score
-                if (self.melody_scores is not None and self.phonetic_scores is not None and 
-                    self.melody_times is not None and self.phonetic_times is not None and
-                    len(self.melody_scores) > 0 and len(self.phonetic_scores) > 0):
-                    
-                    # Use the finer time resolution
-                    if len(self.melody_times) > len(self.phonetic_times):
-                        self.total_times = self.melody_times
-                        interpolated_phonetic = np.interp(
-                            self.total_times, 
-                            self.phonetic_times, 
-                            self.phonetic_scores
-                        )
-                        self.total_scores = 0.6 * self.melody_scores + 0.4 * interpolated_phonetic
-                    else:
-                        self.total_times = self.phonetic_times
-                        interpolated_melody = np.interp(
-                            self.total_times,
-                            self.melody_times,
-                            self.melody_scores
-                        )
-                        self.total_scores = 0.6 * interpolated_melody + 0.4 * self.phonetic_scores
-                    
-                    self.total_score_curve.setData(self.total_times, self.total_scores)
-                    logging.info(f"Updated total score plot with {len(self.total_scores)} points")
-                
-                logging.info(
-                    f"Visualization updated - "
-                    f"Duration: {self.duration:.1f}s, "
-                    f"Original waveform: {len(waveform)} points, "
-                    f"Display waveform: {len(display_waveform)} points, "
-                    f"Melody points: {len(melody_scores) if melody_scores else 0}, "
-                    f"Phonetic points: {len(phonetic_scores) if phonetic_scores else 0}"
-                )
+            # Add new scores to history
+            current_time = timestamp + duration
+            self.total_scores.append(total_score)
+            self.total_times.append(current_time)
+            self.melody_scores.append(melody_score)
+            self.melody_times.append(current_time)
+            self.phonetic_scores.append(phonetic_score)
+            self.phonetic_times.append(current_time)
             
+            # Update plot ranges if needed
+            if current_time > self.duration:
+                self.duration = current_time * 1.5  # Add some extra space
+                for plot in [self.total_score_plot, self.melody_score_plot, self.phonetic_score_plot, self.waveform_plot]:
+                    plot.setXRange(0, self.duration)
+            
+            # Update score plots
+            self.total_score_curve.setData(list(self.total_times), list(self.total_scores))
+            self.melody_score_curve.setData(list(self.melody_times), list(self.melody_scores))
+            self.phonetic_score_curve.setData(list(self.phonetic_times), list(self.phonetic_scores))
+            
+            # Update waveform plot
+            if len(waveform) > 0:
+                # Create time points for waveform
+                times = np.linspace(timestamp, timestamp + duration, len(waveform))
+                self.waveform_curve.setData(times, waveform)
+                
         except Exception as e:
             logging.error(f"Error updating visualization: {e}")
             logging.exception("Full traceback:")
