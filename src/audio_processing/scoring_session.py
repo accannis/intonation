@@ -46,6 +46,13 @@ class ScoringSession:
         # Initialize processing components
         with self.perf_tracker.track_stage("Component Initialization"):
             self._init_components()
+            
+            # Set session info in visualizer
+            self.visualizer.set_session_info(
+                reference_file=self.reference_file,
+                input_source=self.input_source,
+                input_file=self.input_file
+            )
         
         # Process reference audio and start session
         self._start_session()

@@ -36,6 +36,16 @@ class ScoreVisualizer(QMainWindow):
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
         
+        # Create session info group
+        info_group = QGroupBox("Session Info")
+        info_layout = QVBoxLayout()
+        self.ref_file_label = QLabel("Reference Audio: Not set")
+        self.input_source_label = QLabel("Input Source: Not set")
+        info_layout.addWidget(self.ref_file_label)
+        info_layout.addWidget(self.input_source_label)
+        info_group.setLayout(info_layout)
+        main_layout.addWidget(info_group)
+        
         # Create metrics group
         metrics_group = QGroupBox("Performance Metrics")
         metrics_layout = QVBoxLayout()
@@ -111,6 +121,22 @@ class ScoreVisualizer(QMainWindow):
         
         logging.info(f"Visualizer initialized with duration: {duration:.2f}s")
         
+    def set_session_info(self, reference_file: str, input_source: str, input_file: Optional[str] = None):
+        """Update session info display
+        
+        Args:
+            reference_file: Path to reference audio file
+            input_source: Input source (microphone or file)
+            input_file: Optional path to input audio file
+        """
+        import os
+        self.ref_file_label.setText(f"Reference Audio: {os.path.basename(reference_file)}")
+        
+        input_text = f"Input Source: {input_source.title()}"
+        if input_file:
+            input_text += f" ({os.path.basename(input_file)})"
+        self.input_source_label.setText(input_text)
+        
     def update_scores(self, total_score: float, melody_score: float, phonetic_score: float, 
                      waveform: np.ndarray, duration: float, timestamp: float = 0):
         """Update all visualization elements with new scores
@@ -170,7 +196,7 @@ class ScoreVisualizer(QMainWindow):
             if stage not in self.metrics_labels:
                 label = QLabel()
                 self.metrics_labels[stage] = label
-                self.centralWidget().layout().itemAt(0).widget().layout().addWidget(label)
+                self.centralWidget().layout().itemAt(1).widget().layout().addWidget(label)
             
             # Update label text
             self.metrics_labels[stage].setText(f"{stage}: {duration:.3f}s")
