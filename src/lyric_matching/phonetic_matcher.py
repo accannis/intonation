@@ -1,82 +1,68 @@
+"""
+Match phonetic features using MFCC similarity
+"""
+
 import numpy as np
-from typing import Dict, Optional, List
+from typing import Tuple, List
 import logging
-import librosa
+from scipy.spatial.distance import cdist
 
 class PhoneticMatcher:
-    def __init__(self):
-        self.reference_features = None
-        self.reference_mfccs = None
-        
-    def set_reference(self, features: Dict[str, np.ndarray]):
-        """Set reference features for comparison"""
-        try:
-            self.reference_features = features
-            if 'mfccs' in features:
-                self.reference_mfccs = features['mfccs']
-            logging.info("Reference features set for phonetic matching")
-        except Exception as e:
-            logging.error(f"Error setting reference features: {e}")
-            logging.exception("Full traceback:")
-            
-    def compute_phonetic_similarity(self, ref_mfccs: np.ndarray, perf_mfccs: np.ndarray) -> float:
-        """
-        Compute similarity between two MFCC sequences
+    def __init__(self, window_size: float = 1.0):
+        """Initialize phonetic matcher
         
         Args:
-            ref_mfccs: Reference MFCC features
-            perf_mfccs: Performance MFCC features
+            window_size: Size of the sliding window in seconds
+        """
+        self.window_size = window_size
+        
+    def match(self, reference_mfcc: np.ndarray, input_mfcc: np.ndarray) -> Tuple[List[float], List[float]]:
+        """Match input MFCCs against reference MFCCs
+        
+        Args:
+            reference_mfcc: Reference MFCC features (n_mfcc x time)
+            input_mfcc: Input MFCC features to compare (n_mfcc x time)
             
         Returns:
-            Similarity score between 0 and 1
+            Tuple of (scores, times) where:
+                scores: List of similarity scores (0-100) for each window
+                times: List of time points corresponding to the scores
         """
         try:
-            # Ensure same number of time steps by truncating or padding
-            min_length = min(ref_mfccs.shape[1], perf_mfccs.shape[1])
-            ref_mfccs = ref_mfccs[:, :min_length]
-            perf_mfccs = perf_mfccs[:, :min_length]
+            # Get dimensions
+            n_mfcc, ref_frames = reference_mfcc.shape
+            _, input_frames = input_mfcc.shape
             
-            # Compute cosine similarity for each time step
-            similarities = []
-            for t in range(min_length):
-                ref_vec = ref_mfccs[:, t]
-                perf_vec = perf_mfccs[:, t]
-                
-                # Normalize vectors
-                ref_norm = np.linalg.norm(ref_vec)
-                perf_norm = np.linalg.norm(perf_vec)
-                
-                if ref_norm > 0 and perf_norm > 0:
-                    similarity = np.dot(ref_vec, perf_vec) / (ref_norm * perf_norm)
-                    similarities.append(max(0, similarity))  # Only keep positive similarities
-                    
-            if not similarities:
-                return 0.0
-                
-            # Return average similarity
-            return np.mean(similarities)
+            # Calculate window size in frames
+            frames_per_second = input_frames / ref_frames
+            window_frames = max(int(self.window_size * frames_per_second), 2)  # Ensure minimum window size
+            step_size = max(window_frames // 2, 1)  # Ensure minimum step size
             
-        except Exception as e:
-            logging.error(f"Error computing phonetic similarity: {e}")
-            return 0.0
-
-    def calculate_score(self, features: Optional[Dict[str, np.ndarray]]) -> float:
-        """Calculate phonetic score by comparing with reference"""
-        try:
-            if features is None or self.reference_mfccs is None:
-                return 0.0
-                
-            if 'mfccs' not in features:
-                return 0.0
-                
-            # Compute similarity
-            similarity = self.compute_phonetic_similarity(self.reference_mfccs, features['mfccs'])
+            # Initialize lists for scores and times
+            scores = []
+            times = []
             
-            # Convert to score (0-100)
-            score = similarity * 100.0
-            
-            return score
+            # Slide window over input MFCCs
+            for i in range(0, input_frames - window_frames, step_size):
+                # Get current window
+                window = input_mfcc[:, i:i + window_frames]
+                
+                # Calculate cosine distance between window and reference
+                distances = cdist(window.T, reference_mfcc.T, metric='cosine')
+                
+                # Get minimum distance for this window
+                min_distance = np.min(distances)
+                
+                # Convert distance to similarity score (0-100)
+                # Cosine distance ranges from 0 (identical) to 2 (opposite)
+                score = 100 * (1 - min_distance / 2)
+                
+                scores.append(score)
+                times.append(i / frames_per_second)
+                
+            return scores, times
             
         except Exception as e:
-            logging.error(f"Error calculating phonetic score: {e}")
-            return 0.0
+            logging.error(f"Error matching phonetic features: {e}")
+            logging.exception("Full traceback:")
+            return [], []

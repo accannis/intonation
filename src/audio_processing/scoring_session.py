@@ -6,7 +6,8 @@ import os
 import logging
 import queue
 import numpy as np
-from typing import Dict, Optional
+from typing import Dict, Optional, List, Tuple
+from datetime import datetime, timedelta
 
 from src.feature_extraction.audio_features import AudioFeatureExtractor
 from src.melody_matching.dtw_matcher import MelodyMatcher
@@ -15,7 +16,7 @@ from src.scoring.score_calculator import ScoreCalculator
 from src.preprocessing.vocal_separator import VocalSeparator
 from src.lyric_matching.lyric_provider import LyricProvider
 from src.visualization.score_visualizer import ScoreVisualizer
-from src.audio_processing.file_processor import AudioFileProcessor
+from src.audio_processing.file_processor import AudioFileProcessor, AudioFileData
 from src.audio_processing.mic_processor import MicrophoneProcessor
 
 class ScoringSession:
@@ -49,37 +50,34 @@ class ScoringSession:
         self.vocal_separator = VocalSeparator()
         self.lyric_provider = LyricProvider()
         
+        # Create visualizer
+        self.visualizer = ScoreVisualizer()
+        self.visualizer.show()
+        
         # Create audio processors
-        self.reference_processor = AudioFileProcessor(chunk_callback=None)  # Reference processor doesn't need callback
+        self.reference_processor = AudioFileProcessor()
         if self.input_source == 'file':
-            self.input_processor = AudioFileProcessor(chunk_callback=self.process_audio_chunk)
+            self.input_processor = AudioFileProcessor()
         else:
             self.input_processor = MicrophoneProcessor(chunk_callback=self.process_audio_chunk)
         
-        # Create visualizer
-        self.visualizer = ScoreVisualizer()
-        
-        # Initialize processing queue
+        # Initialize processing queue for microphone input
         self.audio_queue = queue.Queue()
-        
+            
     def _start_session(self):
         """Start the scoring session"""
         try:
-            # Validate reference file
-            if not os.path.exists(self.reference_file):
-                raise FileNotFoundError(f"Reference audio file not found: {self.reference_file}")
-                
-            # Process reference audio
+            # Process reference audio first
             self._process_reference_audio()
             
-            # Show visualizer
-            self.visualizer.show()
-            
-            # Start audio input
+            # Handle input based on source
             if self.input_source == 'microphone':
                 self.input_processor.start_input()
             else:
-                self.input_processor.start_playback(self.input_file)
+                # For file input, process everything at once
+                self._process_input_file()
+                # Start playback for user feedback
+                self.input_processor.start_playback()
                 
         except Exception as e:
             logging.error(f"Error starting session: {e}")
@@ -89,49 +87,94 @@ class ScoringSession:
     def _process_reference_audio(self):
         """Process the reference audio file"""
         try:
-            # Load and process reference audio
-            waveform, sample_rate, chunk_size, num_chunks = self.reference_processor.load_reference_audio(
-                self.reference_file
-            )
-            
-            reference_features = None
-            
-            # Process each chunk
-            for i in range(num_chunks):
-                start = i * chunk_size
-                end = start + chunk_size
-                chunk = waveform[start:end]
+            # Try to get features from cache first
+            self.reference_features = self.feature_extractor.extract_features(self.reference_file, include_waveform=False)
+            if self.reference_features is None:
+                raise RuntimeError("Failed to extract features from reference audio")
                 
-                # Extract features from chunk
-                chunk_features = self.feature_extractor.extract_features(chunk)
-                if chunk_features is None:
-                    continue
-                    
-                # Initialize reference features with first chunk
-                if reference_features is None:
-                    reference_features = {
-                        'mfccs': chunk_features['mfccs'],
-                        'mel_spec': chunk_features['mel_spec'],
-                        'pitch': chunk_features['pitch']
-                    }
-                else:
-                    # Concatenate features
-                    reference_features['mfccs'] = np.concatenate([reference_features['mfccs'], chunk_features['mfccs']], axis=1)
-                    reference_features['mel_spec'] = np.concatenate([reference_features['mel_spec'], chunk_features['mel_spec']], axis=1)
-                    reference_features['pitch'] = np.concatenate([reference_features['pitch'], chunk_features['pitch']])
+            # Get duration from audio file metadata without loading the entire file
+            sample_rate, duration = self.reference_processor.get_audio_info(self.reference_file)
             
-            if reference_features is None:
-                raise Exception("Failed to extract features from reference audio")
+            # Initialize visualizer with reference duration
+            self.visualizer.initialize(duration)
             
-            # Set reference for matchers
-            self.melody_matcher.set_reference(reference_features)
-            self.phonetic_matcher.set_reference(reference_features)
-            
-            # Initialize score calculator
-            self.score_calculator.set_weights(melody_weight=0.6, phonetic_weight=0.4)
+            logging.info(
+                f"Reference features extracted: "
+                f"melody shape={self.reference_features['melody'].shape}, "
+                f"phonetic shape={self.reference_features['phonetic'].shape}, "
+                f"duration={duration:.2f}s"
+            )
             
         except Exception as e:
             logging.error(f"Error processing reference audio: {e}")
+            logging.exception("Full traceback:")
+            raise
+            
+    def _process_input_file(self):
+        """Process input audio file all at once"""
+        try:
+            # Load and process entire input audio
+            input_data = self.input_processor.load_audio(self.input_file)
+            
+            # Extract features from entire input audio (include waveform for visualization)
+            input_features = self.feature_extractor.extract_features(input_data.waveform, include_waveform=True)
+            if input_features is None:
+                raise RuntimeError("Failed to extract features from input audio")
+                
+            logging.info(
+                f"Input features extracted: "
+                f"melody shape={input_features['melody'].shape}, "
+                f"phonetic shape={input_features['phonetic'].shape}, "
+                f"waveform points: {len(input_features['waveform'])}"
+            )
+            
+            # Calculate melody scores over time
+            melody_scores, melody_times = self.melody_matcher.match(
+                self.reference_features['melody'],
+                input_features['melody']
+            )
+            
+            logging.info(f"Melody scores calculated: {len(melody_scores)} points")
+            
+            # Calculate phonetic scores over time
+            phonetic_scores, phonetic_times = self.phonetic_matcher.match(
+                self.reference_features['phonetic'],
+                input_features['phonetic']
+            )
+            
+            logging.info(f"Phonetic scores calculated: {len(phonetic_scores)} points")
+            
+            # Calculate current scores (using the last values)
+            current_melody_score = melody_scores[-1] if len(melody_scores) > 0 else 0.0
+            current_phonetic_score = phonetic_scores[-1] if len(phonetic_scores) > 0 else 0.0
+            current_total_score = self.score_calculator.calculate(
+                melody_score=current_melody_score,
+                phonetic_score=current_phonetic_score
+            )
+            
+            logging.info(
+                f"Current scores: "
+                f"melody={current_melody_score:.1f}, "
+                f"phonetic={current_phonetic_score:.1f}, "
+                f"total={current_total_score:.1f}"
+            )
+            
+            # Update visualizer with all scores
+            self.visualizer.update_scores(
+                total_score=current_total_score,
+                melody_score=current_melody_score,
+                phonetic_score=current_phonetic_score,
+                waveform=input_features['waveform'],
+                melody_scores=melody_scores,
+                melody_times=melody_times,
+                phonetic_scores=phonetic_scores,
+                phonetic_times=phonetic_times
+            )
+            
+            logging.info(f"Input file processed: duration={input_data.duration:.2f}s")
+            
+        except Exception as e:
+            logging.error(f"Error processing input file: {e}")
             logging.exception("Full traceback:")
             raise
             
@@ -146,30 +189,45 @@ class ScoringSession:
             if len(audio_data.shape) > 1:
                 audio_data = np.mean(audio_data, axis=0)
             
-            # Extract features
-            features = self.feature_extractor.extract_features(audio_data)
+            # Set feature extractor sample rate to match audio
+            self.feature_extractor.sample_rate = self.input_processor.sample_rate
+            
+            # Extract features (include waveform for visualization)
+            features = self.feature_extractor.extract_features(audio_data, include_waveform=True)
             if features is None:
-                logging.warning("Failed to extract features from audio chunk")
                 return
                 
-            # Calculate scores
-            melody_score = self.melody_matcher.calculate_score(features)
-            phonetic_score = self.phonetic_matcher.calculate_score(features)
-            total_score = self.score_calculator.calculate_total_score(melody_score, phonetic_score)
+            # Calculate melody score
+            melody_scores, melody_times = self.melody_matcher.match(
+                self.reference_features['melody'],
+                features['melody']
+            )
             
-            # Create feature dictionary
-            feature_dict = {
-                'melody_score': melody_score,
-                'phonetic_score': phonetic_score,
-                'total_score': total_score,
-                'feedback': f"Melody: {melody_score:.1f}, Phonetic: {phonetic_score:.1f}"
-            }
+            # Calculate phonetic score
+            phonetic_scores, phonetic_times = self.phonetic_matcher.match(
+                self.reference_features['phonetic'],
+                features['phonetic']
+            )
             
-            # Update visualizer
-            self.visualizer.update_display(feature_dict, timestamp, audio_data)
+            # Calculate current scores (using the last values)
+            current_melody_score = melody_scores[-1] if len(melody_scores) > 0 else 0.0
+            current_phonetic_score = phonetic_scores[-1] if len(phonetic_scores) > 0 else 0.0
+            current_total_score = self.score_calculator.calculate(
+                melody_score=current_melody_score,
+                phonetic_score=current_phonetic_score
+            )
             
-            # Store in queue for analysis
-            self.audio_queue.put((feature_dict, timestamp))
+            # Update visualizer with current chunk
+            self.visualizer.update_scores(
+                total_score=current_total_score,
+                melody_score=current_melody_score,
+                phonetic_score=current_phonetic_score,
+                waveform=features['waveform'],
+                melody_scores=melody_scores,
+                melody_times=melody_times,
+                phonetic_scores=phonetic_scores,
+                phonetic_times=phonetic_times
+            )
             
         except Exception as e:
             logging.error(f"Error processing audio chunk: {e}")
@@ -177,10 +235,11 @@ class ScoringSession:
             
     def cleanup(self):
         """Clean up session resources"""
-        if hasattr(self, 'visualizer'):
-            self.visualizer.close()
-        
-        if self.input_source == 'microphone':
-            self.input_processor.stop_input()
-        else:
-            self.input_processor.stop_playback()
+        try:
+            if self.input_processor:
+                self.input_processor.stop_playback()
+            if self.visualizer:
+                self.visualizer.close()
+        except Exception as e:
+            logging.error(f"Error cleaning up session: {e}")
+            logging.exception("Full traceback:")

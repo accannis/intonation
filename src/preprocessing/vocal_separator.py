@@ -1,3 +1,7 @@
+"""
+Separate vocals from mixed audio using Demucs
+"""
+
 import os
 import torch
 from demucs.pretrained import get_model
@@ -16,6 +20,7 @@ if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
 from utils.cache_manager import CacheManager
+from src.audio_processing.file_processor import AudioFileProcessor
 
 class VocalSeparator:
     def __init__(self, device='cpu'):
@@ -29,6 +34,9 @@ class VocalSeparator:
         self.model = get_model('htdemucs')
         self.model.to(device)
         logging.info("Model loaded successfully")
+        
+        # Create file processor
+        self.file_processor = AudioFileProcessor()
         
         # Log cache stats
         stats = self.cache_manager.get_stats()
@@ -54,10 +62,12 @@ class VocalSeparator:
         Returns:
             Path to separated vocals file
         """
-        # Load audio
-        logging.info(f"Loading audio file: {audio_path}")
-        wav, sr = torchaudio.load(audio_path)
-        wav = wav.to(self.device)
+        # Load audio using file processor
+        audio_data = self.file_processor.load_audio(audio_path, log_info=False)
+        wav = torch.from_numpy(audio_data.waveform).to(self.device)
+        if len(wav.shape) == 1:
+            wav = wav.unsqueeze(0)  # Add channel dimension if mono
+        sr = audio_data.sample_rate
         logging.info(f"Audio loaded successfully. Shape: {wav.shape}, Sample rate: {sr}")
         
         # Apply separation model
@@ -99,22 +109,17 @@ class VocalSeparator:
             logging.info(f"Using cached vocals for {os.path.basename(audio_path)}")
             return cached_vocals
             
-        logging.info(f"No cached vocals found for {os.path.basename(audio_path)}, performing separation...")
+        # Create output path in cache directory
+        output_path = os.path.join(self.cache_manager.cache_dir, f"{file_hash}.wav")
         
-        # Generate cache paths
-        vocals_filename = f"{file_hash}_vocals.wav"
-        cached_vocals_path = os.path.join(self.cache_manager.cache_dir, vocals_filename)
-        
-        # Perform separation directly to cache location
-        vocals_path = self.separate_vocals(audio_path, cached_vocals_path)
+        # Process audio and save to cache
+        output_path = self.separate_vocals(audio_path, output_path)
         
         # Add to cache
         self.cache_manager.add_to_cache(
             file_hash=file_hash,
             original_file=os.path.basename(audio_path),
-            cache_file=vocals_filename,
-            metadata={'sample_rate': 44100}
+            cache_file=os.path.basename(output_path)
         )
-        logging.info(f"Cached vocals for: {os.path.basename(audio_path)}")
         
-        return vocals_path
+        return output_path
