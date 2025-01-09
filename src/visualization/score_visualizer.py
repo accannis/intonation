@@ -35,23 +35,63 @@ class ScoreVisualizer(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
+        main_layout.setSpacing(5)  # Reduce spacing between elements
+        
+        # Create top info section (session info + metrics)
+        top_layout = QHBoxLayout()
+        top_layout.setSpacing(10)  # Spacing between info and metrics
         
         # Create session info group
         info_group = QGroupBox("Session Info")
+        info_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 11px;
+                padding-top: 8px;
+                margin-top: 0px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 3px;
+            }
+        """)
         info_layout = QVBoxLayout()
+        info_layout.setSpacing(2)  # Minimal spacing between labels
+        info_layout.setContentsMargins(5, 5, 5, 5)  # Minimal margins
+        
         self.ref_file_label = QLabel("Reference Audio: Not set")
         self.input_source_label = QLabel("Input Source: Not set")
+        for label in [self.ref_file_label, self.input_source_label]:
+            label.setStyleSheet("font-size: 11px;")
+        
         info_layout.addWidget(self.ref_file_label)
         info_layout.addWidget(self.input_source_label)
         info_group.setLayout(info_layout)
-        main_layout.addWidget(info_group)
+        top_layout.addWidget(info_group)
         
         # Create metrics group
         metrics_group = QGroupBox("Performance Metrics")
+        metrics_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 11px;
+                padding-top: 8px;
+                margin-top: 0px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 3px;
+            }
+        """)
         metrics_layout = QVBoxLayout()
+        metrics_layout.setSpacing(2)  # Minimal spacing between metrics
+        metrics_layout.setContentsMargins(5, 5, 5, 5)  # Minimal margins
         self.metrics_labels = {}
         metrics_group.setLayout(metrics_layout)
-        main_layout.addWidget(metrics_group)
+        top_layout.addWidget(metrics_group)
+        
+        # Add top section to main layout
+        main_layout.addLayout(top_layout)
         
         # Create score labels
         scores_layout = QHBoxLayout()
@@ -195,8 +235,9 @@ class ScoreVisualizer(QMainWindow):
         for stage, duration in metrics.items():
             if stage not in self.metrics_labels:
                 label = QLabel()
+                label.setStyleSheet("font-size: 11px;")  # Small font for metrics
                 self.metrics_labels[stage] = label
-                self.centralWidget().layout().itemAt(1).widget().layout().addWidget(label)
+                self.centralWidget().layout().itemAt(0).itemAt(1).widget().layout().addWidget(label)
             
             # Update label text
             self.metrics_labels[stage].setText(f"{stage}: {duration:.3f}s")
