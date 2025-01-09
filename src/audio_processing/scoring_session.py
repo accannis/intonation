@@ -18,6 +18,7 @@ from src.lyric_matching.lyric_provider import LyricProvider
 from src.visualization.score_visualizer import ScoreVisualizer
 from src.audio_processing.file_processor import AudioFileProcessor, AudioFileData
 from src.audio_processing.mic_processor import MicrophoneProcessor
+from src.utils.performance_tracker import PerformanceTracker
 
 class ScoringSession:
     def __init__(self, config: Dict):
@@ -36,8 +37,15 @@ class ScoringSession:
             self.input_file = os.path.abspath(self.input_file)
         self.reference_file = os.path.abspath(config['reference_file'])
         
+        # Create performance tracker
+        session_name = f"session_{os.path.basename(self.reference_file)}_{self.input_source}"
+        if self.input_file:
+            session_name += f"_{os.path.basename(self.input_file)}"
+        self.perf_tracker = PerformanceTracker(name=session_name)
+        
         # Initialize processing components
-        self._init_components()
+        with self.perf_tracker.track_stage("Component Initialization"):
+            self._init_components()
         
         # Process reference audio and start session
         self._start_session()
@@ -80,13 +88,17 @@ class ScoringSession:
                 self.input_processor.start_input()
             else:
                 # For file input, get input file duration
-                sample_rate, input_duration = self.input_processor.get_audio_info(self.input_file)
-                self.visualizer.initialize(duration=input_duration)
+                with self.perf_tracker.track_stage("Get Input Duration"):
+                    sample_rate, input_duration = self.input_processor.get_audio_info(self.input_file)
+                    self.visualizer.initialize(duration=input_duration)
                 
                 # Process entire input file
                 self._process_input_file()
                 # Start playback for user feedback
                 self.input_processor.start_playback()
+                
+            # Update visualizer with performance metrics
+            self.visualizer.update_metrics(self.perf_tracker.get_all_metrics())
                 
         except Exception as e:
             logging.error(f"Error starting session: {e}")
@@ -98,9 +110,10 @@ class ScoringSession:
         try:
             # Try to get features from cache first
             logging.debug(f"Processing reference audio file: {self.reference_file}")
-            self.reference_features = self.feature_extractor.extract_features(self.reference_file, include_waveform=False)
-            if self.reference_features is None:
-                raise RuntimeError("Failed to extract features from reference audio")
+            with self.perf_tracker.track_stage("Extract Reference Features"):
+                self.reference_features = self.feature_extractor.extract_features(self.reference_file, include_waveform=False)
+                if self.reference_features is None:
+                    raise RuntimeError("Failed to extract features from reference audio")
                 
             logging.info(
                 f"Reference features extracted: "
@@ -118,15 +131,21 @@ class ScoringSession:
         """Process input audio file all at once"""
         try:
             # Load and process entire input audio
-            input_data = self.input_processor.load_audio(self.input_file)
+            with self.perf_tracker.track_stage("Load Input Audio"):
+                input_data = self.input_processor.load_audio(self.input_file)
             
             # Extract features from entire input audio (include waveform for visualization)
-            input_features = self.feature_extractor.extract_features(input_data.waveform, include_waveform=True)
-            if input_features is None:
-                raise RuntimeError("Failed to extract features from input audio")
+            with self.perf_tracker.track_stage("Extract Input Features"):
+                input_features = self.feature_extractor.extract_features(input_data.waveform, include_waveform=True)
+                if input_features is None:
+                    raise RuntimeError("Failed to extract features from input audio")
                 
             # Process features
-            self.process_features(input_features, input_data.duration)
+            with self.perf_tracker.track_stage("Initial Feature Processing"):
+                self.process_features(input_features, input_data.duration)
+                
+            # Log performance summary
+            self.perf_tracker.log_summary()
             
         except Exception as e:
             logging.error(f"Error processing input file: {e}")
@@ -137,13 +156,14 @@ class ScoringSession:
         """Process a chunk of audio data"""
         try:
             # Extract features from audio chunk
-            chunk_features = self.feature_extractor.extract_features(audio_data.waveform, include_waveform=True)
-            if chunk_features is None:
-                logging.warning("Failed to extract features from audio chunk")
-                return
+            with self.perf_tracker.track_stage("Process Audio Chunk"):
+                chunk_features = self.feature_extractor.extract_features(audio_data.waveform, include_waveform=True)
+                if chunk_features is None:
+                    logging.warning("Failed to extract features from audio chunk")
+                    return
                 
-            # Process features
-            self.process_features(chunk_features, audio_data.duration, timestamp)
+                # Process features
+                self.process_features(chunk_features, audio_data.duration, timestamp)
             
         except Exception as e:
             logging.error(f"Error processing audio chunk: {e}")
@@ -153,34 +173,41 @@ class ScoringSession:
         """Process extracted features"""
         try:
             # Match melody
-            melody_scores, melody_times = self.melody_matcher.match(
-                self.reference_features['melody'],
-                features['melody']
-            )
+            with self.perf_tracker.track_stage("Melody Matching"):
+                melody_scores, melody_times = self.melody_matcher.match(
+                    self.reference_features['melody'],
+                    features['melody']
+                )
             
             # Match phonetics
-            phonetic_scores, phonetic_times = self.phonetic_matcher.match(
-                self.reference_features['phonetic'],
-                features['phonetic']
-            )
+            with self.perf_tracker.track_stage("Phonetic Matching"):
+                phonetic_scores, phonetic_times = self.phonetic_matcher.match(
+                    self.reference_features['phonetic'],
+                    features['phonetic']
+                )
             
             # Calculate current scores (using the last values)
-            current_melody_score = melody_scores[-1] if len(melody_scores) > 0 else 0.0
-            current_phonetic_score = phonetic_scores[-1] if len(phonetic_scores) > 0 else 0.0
-            current_total_score = self.score_calculator.calculate_total_score(
-                melody_score=current_melody_score,
-                phonetic_score=current_phonetic_score
-            )
+            with self.perf_tracker.track_stage("Score Calculation"):
+                current_melody_score = melody_scores[-1] if len(melody_scores) > 0 else 0.0
+                current_phonetic_score = phonetic_scores[-1] if len(phonetic_scores) > 0 else 0.0
+                current_total_score = self.score_calculator.calculate_total_score(
+                    melody_score=current_melody_score,
+                    phonetic_score=current_phonetic_score
+                )
             
             # Update visualization
-            self.visualizer.update_scores(
-                waveform=features['waveform'],
-                melody_score=current_melody_score,
-                phonetic_score=current_phonetic_score,
-                total_score=current_total_score,
-                duration=duration,
-                timestamp=timestamp
-            )
+            with self.perf_tracker.track_stage("Update Visualization"):
+                self.visualizer.update_scores(
+                    waveform=features['waveform'],
+                    melody_score=current_melody_score,
+                    phonetic_score=current_phonetic_score,
+                    total_score=current_total_score,
+                    duration=duration,
+                    timestamp=timestamp
+                )
+                
+                # Update performance metrics
+                self.visualizer.update_metrics(self.perf_tracker.get_all_metrics())
             
         except Exception as e:
             logging.error(f"Error processing features: {e}")

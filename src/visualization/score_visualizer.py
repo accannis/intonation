@@ -3,13 +3,13 @@ Visualization window for displaying scores and performance metrics
 """
 
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-                           QLabel, QTextEdit, QSizePolicy)
+                           QLabel, QTextEdit, QSizePolicy, QGroupBox)
 from PyQt6.QtCore import Qt, QTimer
 import pyqtgraph as pg
 import numpy as np
 import logging
 from collections import deque
-from typing import List, Optional
+from typing import List, Optional, Dict
 from scipy.interpolate import interp1d
 
 # Configure pyqtgraph
@@ -35,6 +35,13 @@ class ScoreVisualizer(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
+        
+        # Create metrics group
+        metrics_group = QGroupBox("Performance Metrics")
+        metrics_layout = QVBoxLayout()
+        self.metrics_labels = {}
+        metrics_group.setLayout(metrics_layout)
+        main_layout.addWidget(metrics_group)
         
         # Create score labels
         scores_layout = QHBoxLayout()
@@ -151,3 +158,19 @@ class ScoreVisualizer(QMainWindow):
         except Exception as e:
             logging.error(f"Error updating visualization: {e}")
             logging.exception("Full traceback:")
+            
+    def update_metrics(self, metrics: Dict[str, float]):
+        """Update performance metrics display
+        
+        Args:
+            metrics: Dict mapping stage names to durations in seconds
+        """
+        # Create or update labels for each metric
+        for stage, duration in metrics.items():
+            if stage not in self.metrics_labels:
+                label = QLabel()
+                self.metrics_labels[stage] = label
+                self.centralWidget().layout().itemAt(0).widget().layout().addWidget(label)
+            
+            # Update label text
+            self.metrics_labels[stage].setText(f"{stage}: {duration:.3f}s")
