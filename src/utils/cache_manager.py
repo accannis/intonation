@@ -76,17 +76,10 @@ class CacheManager:
         
         # First, remove expired files
         for file_hash, info in list(self.index.items()):
-            # Handle legacy cache files
             if 'cache_file' not in info:
-                # Try to find the file using old naming conventions
-                if 'vocals_file' in info:
-                    info['cache_file'] = info['vocals_file']
-                elif 'lyrics_file' in info:
-                    info['cache_file'] = info['lyrics_file']
-                else:
-                    files_to_remove.append(file_hash)
-                    continue
-            
+                files_to_remove.append(file_hash)
+                continue
+                
             file_path = os.path.join(self.cache_dir, info['cache_file'])
             if not os.path.exists(file_path):
                 del self.index[file_hash]
@@ -96,7 +89,6 @@ class CacheManager:
             if 'last_accessed' not in info:
                 if 'created_at' in info:
                     try:
-                        # Convert string timestamp to float if needed
                         created_at = float(info['created_at'])
                         info['last_accessed'] = created_at
                     except:
@@ -131,7 +123,7 @@ class CacheManager:
     def get_from_cache(self, file_hash: str) -> Optional[str]:
         """Get path to cached file if it exists"""
         info = self.index.get(file_hash)
-        if info:
+        if info and 'cache_file' in info:
             cache_path = os.path.join(self.cache_dir, info['cache_file'])
             if os.path.exists(cache_path):
                 # Update last access time
@@ -168,6 +160,7 @@ class CacheManager:
             self.index[file_hash].update(metadata)
             
         self._save_index()
+        logging.debug(f"Added {cache_file} to cache index with hash {file_hash}")
         return os.path.join(self.cache_dir, cache_file)
         
     def remove_from_cache(self, file_hash: str):
@@ -181,6 +174,7 @@ class CacheManager:
                 except Exception as e:
                     logging.error(f"Error removing cache file: {e}")
             del self.index[file_hash]
+            self._save_index()
             
     def get_stats(self) -> Dict:
         """Get cache statistics"""

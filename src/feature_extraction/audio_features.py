@@ -34,79 +34,73 @@ class AudioFeatureExtractor:
                 - waveform: Processed audio waveform (only if include_waveform=True)
         """
         try:
+            audio_path = None
             # If audio_data is a string, check cache first
             if isinstance(audio_data, str) and os.path.isfile(audio_data):
-                cached_features = self.feature_cache.get_features(audio_data)
+                audio_path = os.path.abspath(audio_data)  # Ensure we have full path
+                logging.info(f"Checking cache for {os.path.basename(audio_path)}")
+                cached_features = self.feature_cache.get_features(audio_path)
                 if cached_features is not None:
+                    logging.info(f"Using cached features for {os.path.basename(audio_path)}")
                     # Add waveform if needed
-                    if include_waveform:
+                    if include_waveform and 'waveform' not in cached_features:
                         # Don't log loading message for cached features
-                        audio_data = self.file_processor.load_audio(audio_data, log_info=False)
+                        audio_data = self.file_processor.load_audio(audio_path, log_info=False)
                         waveform = audio_data.waveform / np.max(np.abs(audio_data.waveform))
                         cached_features['waveform'] = waveform
                     return cached_features
                 
-            # Load audio if needed
-            if isinstance(audio_data, str):
-                audio_data = self.file_processor.load_audio(audio_data, log_info=False)
-                y = audio_data.waveform
-                self.sample_rate = audio_data.sample_rate
-            else:
-                y = audio_data
+                # Load audio data from file
+                audio_data = self.file_processor.load_audio(audio_path)
+                if audio_data is None:
+                    return None
+                audio_data = audio_data.waveform
                 
-            # Convert to float32 if needed
-            if y.dtype != np.float32:
-                y = y.astype(np.float32)
+            # Ensure audio data is the right shape
+            if len(audio_data.shape) > 1:
+                audio_data = np.mean(audio_data, axis=0)
                 
-            # Ensure audio is mono
-            if len(y.shape) > 1:
-                y = np.mean(y, axis=1)
-                
-            # Check if we have enough samples
-            min_samples = self.hop_length * 4  # Ensure enough samples for features
-            if len(y) < min_samples:
-                # Pad with zeros if needed
-                y = np.pad(y, (0, min_samples - len(y)))
-                
-            # Extract melody features (pitch)
+            # Normalize audio
+            audio_data = audio_data / np.max(np.abs(audio_data))
+            
+            # Extract melody features (pitch contour)
             f0, voiced_flag, voiced_probs = librosa.pyin(
-                y,
+                audio_data, 
                 fmin=librosa.note_to_hz('C2'),
                 fmax=librosa.note_to_hz('C7'),
-                sr=self.sample_rate,
-                hop_length=self.hop_length
+                sr=self.sample_rate
             )
+            melody = np.where(voiced_flag, f0, 0)
             
-            # Clean up pitch contour
-            melody = np.where(voiced_flag, f0, 0.0)
-            
-            # Extract phonetic features (MFCCs)
-            mfccs = librosa.feature.mfcc(
-                y=y, 
+            # Extract phonetic features (MFCC)
+            mfcc = librosa.feature.mfcc(
+                y=audio_data,
                 sr=self.sample_rate,
                 n_mfcc=self.n_mfcc,
                 hop_length=self.hop_length
             )
             
-            # Initialize features dictionary
+            # Create features dictionary
             features = {
-                'melody': melody,
-                'phonetic': mfccs
+                'melody': melody.astype(np.float32),
+                'phonetic': mfcc.astype(np.float32)
             }
             
-            # Only include waveform if requested
+            # Add waveform if requested
             if include_waveform:
-                # Normalize waveform to -1 to 1 range
-                waveform = y / np.max(np.abs(y))
-                features['waveform'] = waveform
+                features['waveform'] = audio_data.astype(np.float32)
             
-            # Cache features if this was loaded from a file
-            if isinstance(audio_data, str) and os.path.isfile(audio_data):
-                # Cache without waveform
+            # Cache features if we loaded from file
+            if audio_path:
+                logging.info(f"Attempting to cache features for {os.path.basename(audio_path)}")
+                # Cache without waveform to save space
                 cache_features = {k: v for k, v in features.items() if k != 'waveform'}
-                self.feature_cache.cache_features(audio_data, cache_features)
+                success = self.feature_cache.cache_features(audio_path, cache_features)
+                if success:
+                    logging.info(f"Successfully cached features for {os.path.basename(audio_path)}")
+                else:
+                    logging.error(f"Failed to cache features for {os.path.basename(audio_path)}")
             
-            # Return features dictionary
             return features
             
         except Exception as e:

@@ -50,8 +50,8 @@ class SingingScorer:
             logging.exception("Full traceback:")
             QMessageBox.critical(
                 None,
-                "Setup Error",
-                f"Error completing setup: {str(e)}",
+                "Error",
+                f"Failed to start scoring session: {str(e)}",
                 QMessageBox.StandardButton.Ok
             )
 
@@ -59,7 +59,7 @@ def main():
     """Main entry point"""
     app = QApplication(sys.argv)
     scorer = SingingScorer()
-    sys.exit(app.exec())
+    return app.exec()
 
 if __name__ == "__main__":
     main()
