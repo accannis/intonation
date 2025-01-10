@@ -197,25 +197,51 @@ class SetupWindow(QMainWindow):
         self.start_button.setEnabled(can_start)
         
     def _start_session(self):
-        """Start scoring session"""
+        """Start scoring session with current configuration"""
         try:
+            logging.info("Starting scoring session")
+            
+            # Validate reference file
+            if not self.reference_file:
+                QMessageBox.warning(self, "Error", "Please select a reference audio file")
+                return
+                
+            if not os.path.exists(self.reference_file):
+                QMessageBox.warning(self, "Error", "Reference file does not exist")
+                return
+            
+            # Get input source
+            input_source = self.input_combo.currentText().lower()
+            
+            # Get input file if using file input
+            input_file = None
+            if input_source == 'file':
+                if not self.input_file:
+                    QMessageBox.warning(self, "Error", "Please select an input audio file")
+                    return
+                    
+                if not os.path.exists(self.input_file):
+                    QMessageBox.warning(self, "Error", "Input file does not exist")
+                    return
+                    
+                input_file = self.input_file
+            
             # Create session config
             config = {
+                'input_source': input_source,
                 'reference_file': self.reference_file,
-                'input_source': 'file' if self.input_combo.currentText().lower() == "file" else 'microphone'
+                'input_file': input_file
             }
-            if config['input_source'] == 'file':
-                config['input_file'] = self.input_file
-                
-            # Start or reveal session
+            
+            logging.info(f"Session config: {config}")
+            
+            # Start session
             self.session_manager.start_session(config)
+            
+            # Save settings
+            self._save_settings()
             
         except Exception as e:
             logging.error(f"Error starting session: {e}")
             logging.exception("Full traceback:")
-            QMessageBox.critical(
-                self,
-                "Error",
-                f"Failed to start session: {str(e)}",
-                QMessageBox.StandardButton.Ok
-            )
+            QMessageBox.critical(self, "Error", f"Failed to start session: {str(e)}")

@@ -73,17 +73,56 @@ class AudioFeatureExtractor:
             melody = np.where(voiced_flag, f0, 0)
             
             # Extract phonetic features (MFCC)
-            mfcc = librosa.feature.mfcc(
+            # First compute mel spectrogram with more frequency resolution
+            mel_spec = librosa.feature.melspectrogram(
                 y=audio_data,
                 sr=self.sample_rate,
-                n_mfcc=self.n_mfcc,
-                hop_length=self.hop_length
+                n_mels=self.n_mels,
+                hop_length=self.hop_length,
+                n_fft=2048,  # Increased FFT size for better frequency resolution
+                power=2.0  # Use power spectrogram
             )
+            
+            # Convert to log scale with proper scaling
+            mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max, top_db=80)
+            
+            # Extract MFCCs from log mel spectrogram with liftering
+            mfcc = librosa.feature.mfcc(
+                S=mel_spec_db,  # Use pre-computed mel spectrogram
+                n_mfcc=self.n_mfcc,
+                sr=self.sample_rate,
+                lifter=22  # Apply liftering to emphasize important coefficients
+            )
+            
+            # Add delta features with proper width
+            mfcc_delta = librosa.feature.delta(mfcc, width=9)  # Wider window for better temporal context
+            mfcc_delta2 = librosa.feature.delta(mfcc, order=2, width=9)
+            
+            # Normalize each feature stream independently with robust scaling
+            def robust_normalize(x):
+                # Calculate robust statistics
+                q1 = np.percentile(x, 25, axis=1, keepdims=True)
+                q3 = np.percentile(x, 75, axis=1, keepdims=True)
+                median = np.median(x, axis=1, keepdims=True)
+                iqr = q3 - q1
+                # Scale using IQR and center using median
+                return (x - median) / (iqr + 1e-6)
+            
+            mfcc = robust_normalize(mfcc)
+            mfcc_delta = robust_normalize(mfcc_delta)
+            mfcc_delta2 = robust_normalize(mfcc_delta2)
+            
+            # Stack all features with proper weighting
+            phonetic_features = np.vstack([
+                mfcc,           # Base MFCC features
+                0.5 * mfcc_delta,    # Reduced weight for first derivatives
+                0.25 * mfcc_delta2   # Further reduced weight for second derivatives
+            ])
             
             # Create features dictionary
             features = {
                 'melody': melody.astype(np.float32),
-                'phonetic': mfcc.astype(np.float32)
+                'phonetic': phonetic_features.astype(np.float32)
             }
             
             # Add waveform if requested

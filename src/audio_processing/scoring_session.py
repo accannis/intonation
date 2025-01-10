@@ -61,8 +61,15 @@ class ScoringSession:
         """Initialize all session components"""
         # Create processing components
         self.feature_extractor = AudioFeatureExtractor()
+        # Clear feature cache to ensure consistent feature dimensions
+        self.feature_extractor.feature_cache.clear_cache()
         self.melody_matcher = MelodyMatcher()
-        self.phonetic_matcher = PhoneticMatcher()
+        self.phonetic_matcher = PhoneticMatcher(
+            window_size=1.0,  # 1s window
+            min_pattern_duration=0.2,  # Minimum word/syllable duration
+            max_pattern_duration=2.0,  # Maximum phrase duration
+            dtw_window=0.3  # Allow 300ms timing variation
+        )
         self.score_calculator = ScoreCalculator()
         self.vocal_separator = VocalSeparator()
         self.lyric_provider = LyricProvider()
@@ -113,24 +120,100 @@ class ScoringSession:
             raise
             
     def _process_reference_audio(self):
-        """Process the reference audio file"""
+        """Process reference audio and extract features"""
         try:
-            # Try to get features from cache first
-            logging.debug(f"Processing reference audio file: {self.reference_file}")
-            with self.perf_tracker.track_stage("Extract Reference Features"):
+            logging.info("Starting reference audio processing")
+            with self.perf_tracker.track_stage("Reference Audio Processing"):
+                # Load and cache reference features
                 self.reference_features = self.feature_extractor.extract_features(self.reference_file, include_waveform=False)
                 if self.reference_features is None:
                     raise RuntimeError("Failed to extract features from reference audio")
                 
-            logging.info(
-                f"Reference features extracted: "
-                f"path={self.reference_file}, "
-                f"melody shape={self.reference_features['melody'].shape}, "
-                f"phonetic shape={self.reference_features['phonetic'].shape}"
-            )
-            
+                logging.info(
+                    f"Reference features extracted: "
+                    f"melody shape={self.reference_features['melody'].shape}, "
+                    f"phonetic shape={self.reference_features['phonetic'].shape}"
+                )
+                
+                # Extract reference patterns for phonetic matching
+                # Assuming ~50ms per frame (20 fps) - typical for MFCC features
+                _, mfcc_frames = self.reference_features['phonetic'].shape
+                duration = mfcc_frames * 0.05  # 50ms per frame = 0.05s
+                logging.info(f"Extracting reference patterns from {mfcc_frames} frames ({duration:.2f}s)")
+                self._extract_reference_patterns(self.reference_features['phonetic'], duration)
+                
         except Exception as e:
             logging.error(f"Error processing reference audio: {e}")
+            logging.exception("Full traceback:")
+            raise
+            
+    def _extract_reference_patterns(self, mfcc: np.ndarray, duration: float):
+        """Extract reference patterns for phonetic matching
+        
+        For now we'll use voice activity detection to find word boundaries.
+        TODO: Replace with actual word timing from lyrics
+        """
+        try:
+            # Use energy-based segmentation to find word boundaries
+            frame_energy = np.sum(mfcc**2, axis=0)  # Sum squared MFCC coefficients
+            
+            # Normalize energy to [0,1]
+            frame_energy = (frame_energy - np.min(frame_energy)) / (np.max(frame_energy) - np.min(frame_energy))
+            
+            # Use lower threshold since we want to be more sensitive
+            energy_threshold = 0.2  # Fixed threshold
+            
+            logging.info(f"Energy stats - min: {np.min(frame_energy):.3f}, max: {np.max(frame_energy):.3f}, "
+                        f"mean: {np.mean(frame_energy):.3f}, threshold: {energy_threshold:.3f}")
+            
+            # Find regions of high energy (potential words)
+            is_word = frame_energy > energy_threshold
+            
+            # Add small buffer around words
+            buffer_frames = 4  # 200ms buffer (4 frames at 20fps)
+            is_word = np.convolve(is_word, np.ones(buffer_frames), mode='same') > 0
+            
+            # Find word boundaries
+            boundaries = np.where(np.diff(is_word.astype(int)))[0]
+            
+            # Calculate frames per second
+            frames_per_second = len(frame_energy) / duration
+            logging.info(f"Found {len(boundaries)} boundaries at {frames_per_second:.1f} fps")
+            
+            if len(boundaries) < 2:  # No clear word boundaries found
+                logging.warning("No clear word boundaries found, using entire audio as one pattern")
+                # Use entire audio as one pattern
+                pattern_times = [("pattern_0", 0.0, duration)]
+            else:
+                # Convert frame indices to times
+                pattern_times = []
+                
+                # Group boundaries into start/end pairs
+                for i in range(0, len(boundaries)-1, 2):
+                    start_frame = boundaries[i]
+                    end_frame = boundaries[i+1]
+                    
+                    # Convert to times
+                    start_time = start_frame / frames_per_second
+                    end_time = end_frame / frames_per_second
+                    
+                    # Only use segments of reasonable duration
+                    segment_duration = end_time - start_time
+                    if segment_duration >= 0.1 and segment_duration <= 2.0:  # 100ms to 2s
+                        pattern_id = f"pattern_{i//2}"
+                        pattern_times.append((pattern_id, start_time, end_time))
+                        logging.info(f"Found pattern {pattern_id} at [{start_time:.2f}s - {end_time:.2f}s] "
+                                   f"duration {segment_duration:.2f}s")
+                
+                if not pattern_times:  # No valid segments found
+                    logging.warning("No valid word segments found, using entire audio as one pattern")
+                    pattern_times = [("pattern_0", 0.0, duration)]
+            
+            # Extract patterns
+            self.phonetic_matcher.extract_patterns(mfcc, pattern_times)
+            
+        except Exception as e:
+            logging.error(f"Error extracting reference patterns: {e}")
             logging.exception("Full traceback:")
             raise
             
@@ -179,24 +262,37 @@ class ScoringSession:
     def process_features(self, features: Dict[str, np.ndarray], duration: float, timestamp: float = 0):
         """Process extracted features"""
         try:
+            logging.info("Starting feature processing")
+            
             # Match melody
             with self.perf_tracker.track_stage("Melody Matching"):
+                logging.info("Starting melody matching")
                 melody_scores, melody_times = self.melody_matcher.match(
                     self.reference_features['melody'],
                     features['melody']
                 )
+                logging.info(f"Melody scores: {melody_scores}")
             
             # Match phonetics
             with self.perf_tracker.track_stage("Phonetic Matching"):
+                logging.info("Starting phonetic matching")
+                logging.info(f"Reference phonetic shape: {self.reference_features['phonetic'].shape}")
+                logging.info(f"Input phonetic shape: {features['phonetic'].shape}")
                 phonetic_scores, phonetic_times = self.phonetic_matcher.match(
-                    self.reference_features['phonetic'],
+                    self.reference_features['phonetic'],  # Use reference features
                     features['phonetic']
                 )
+                logging.info(f"Phonetic scores: {phonetic_scores}")
             
-            # Calculate current scores (using the last values)
+            # Calculate current scores
             with self.perf_tracker.track_stage("Score Calculation"):
-                current_melody_score = melody_scores[-1] if len(melody_scores) > 0 else 0.0
-                current_phonetic_score = phonetic_scores[-1] if len(phonetic_scores) > 0 else 0.0
+                # Use maximum score from all detections
+                current_melody_score = max(melody_scores) if melody_scores else 0.0
+                current_phonetic_score = max(phonetic_scores) if phonetic_scores else 0.0
+                
+                logging.info(f"Scores - melody: {current_melody_score:.1f}, phonetic: {current_phonetic_score:.1f}")
+                logging.debug(f"All phonetic scores: {phonetic_scores}")
+                
                 current_total_score = self.score_calculator.calculate_total_score(
                     melody_score=current_melody_score,
                     phonetic_score=current_phonetic_score

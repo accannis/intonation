@@ -154,3 +154,14 @@ class FeatureCache:
             logging.error(f"Error caching features: {e}")
             logging.exception("Full traceback:")
             return False
+
+    def clear_cache(self):
+        """Clear all cached features"""
+        try:
+            if os.path.exists(self.cache_dir):
+                for file in os.listdir(self.cache_dir):
+                    if file.endswith('.npy'):
+                        os.remove(os.path.join(self.cache_dir, file))
+            logging.info("Feature cache cleared")
+        except Exception as e:
+            logging.error(f"Error clearing cache: {e}")

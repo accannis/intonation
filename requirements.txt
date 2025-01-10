@@ -10,11 +10,12 @@ h5py>=3.7.0
 plotly>=5.10.0
 matplotlib>=3.5.0
 python-Levenshtein>=0.12.0
-dtaidistance>=2.3.0
 scikit-learn>=1.0.0
 openai-whisper>=20231117
 phonemizer>=3.2.1
 demucs>=4.0.0
 torchaudio>=0.10.0
 soundfile>=0.12.1
+dtw-python==1.3.0
+psutil==5.9.7
 git+https://github.com/accannis/pyaudiosource.git
