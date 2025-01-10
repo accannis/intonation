@@ -17,6 +17,30 @@ class AudioFeatureExtractor:
         self.hop_length = hop_length
         self.n_mels = 128
         self.n_mfcc = 20
+        # Create parameter dictionary for cache key
+        self.parameters = {
+            # Audio parameters
+            'sample_rate': sample_rate,
+            'hop_length': hop_length,
+            
+            # Mel spectrogram parameters
+            'n_mels': self.n_mels,
+            'n_fft': 2048,
+            'mel_power': 2.0,
+            'top_db': 80,
+            
+            # MFCC parameters
+            'n_mfcc': self.n_mfcc,
+            'lifter': 22,
+            'delta_width': 9,
+            
+            # Pitch detection parameters
+            'f0_min': librosa.note_to_hz('C2'),
+            'f0_max': librosa.note_to_hz('C7'),
+            
+            # Feature version (increment when making breaking changes)
+            'feature_version': 1
+        }
         self.feature_cache = FeatureCache()
         self.file_processor = AudioFileProcessor()
         
@@ -39,7 +63,7 @@ class AudioFeatureExtractor:
             if isinstance(audio_data, str) and os.path.isfile(audio_data):
                 audio_path = os.path.abspath(audio_data)  # Ensure we have full path
                 logging.info(f"Checking cache for {os.path.basename(audio_path)}")
-                cached_features = self.feature_cache.get_features(audio_path)
+                cached_features = self.feature_cache.get_features(audio_path, self.parameters)
                 if cached_features is not None:
                     logging.info(f"Using cached features for {os.path.basename(audio_path)}")
                     # Add waveform if needed
@@ -134,7 +158,7 @@ class AudioFeatureExtractor:
                 logging.info(f"Attempting to cache features for {os.path.basename(audio_path)}")
                 # Cache without waveform to save space
                 cache_features = {k: v for k, v in features.items() if k != 'waveform'}
-                success = self.feature_cache.cache_features(audio_path, cache_features)
+                success = self.feature_cache.cache_features(audio_path, self.parameters, cache_features)
                 if success:
                     logging.info(f"Successfully cached features for {os.path.basename(audio_path)}")
                 else:

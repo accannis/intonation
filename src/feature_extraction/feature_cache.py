@@ -8,6 +8,7 @@ import numpy as np
 from typing import Dict, Optional
 import hashlib
 import json
+import time
 
 from src.utils.cache_manager import CacheManager
 
@@ -37,11 +38,46 @@ class FeatureCache:
                 hash_md5.update(chunk)
         return hash_md5.hexdigest()
         
-    def get_features(self, audio_path: str) -> Optional[Dict[str, np.ndarray]]:
+    def _compute_cache_key(self, file_path: str, parameters: Dict) -> str:
+        """Compute cache key from file hash and parameters
+        
+        Args:
+            file_path: Path to audio file
+            parameters: Dictionary of feature extraction parameters
+            
+        Returns:
+            Cache key string
+        """
+        try:
+            # Get file hash
+            file_hash = self._compute_file_hash(file_path)
+            logging.debug(f"File hash: {file_hash}")
+            
+            # Sort parameters to ensure consistent order
+            param_str = json.dumps(parameters, sort_keys=True)
+            logging.debug(f"Parameter string: {param_str}")
+            
+            # Combine file hash and parameters
+            combined = f"{file_hash}_{param_str}"
+            
+            # Hash the combined string
+            cache_key = hashlib.md5(combined.encode()).hexdigest()
+            logging.debug(f"Generated cache key: {cache_key}")
+            
+            return cache_key
+            
+        except Exception as e:
+            logging.error(f"Error computing cache key: {e}")
+            logging.exception("Full traceback:")
+            # Return a unique key to prevent cache hits
+            return f"error_{time.time()}"
+        
+    def get_features(self, audio_path: str, parameters: Dict) -> Optional[Dict[str, np.ndarray]]:
         """Get cached features for an audio file
         
         Args:
             audio_path: Path to audio file
+            parameters: Dictionary of feature extraction parameters
             
         Returns:
             Dictionary of features if found in cache, None otherwise
@@ -49,107 +85,66 @@ class FeatureCache:
         try:
             # Log full path
             abs_path = os.path.abspath(audio_path)
-            logging.info(f"Looking for cached features at path: {abs_path}")
+            logging.debug(f"Getting features for {abs_path}")
             
-            # Compute hash of audio file
-            file_hash = self._compute_file_hash(abs_path)
-            logging.info(f"Computed hash for {os.path.basename(abs_path)}: {file_hash}")
+            # Compute cache key
+            cache_key = self._compute_cache_key(abs_path, parameters)
+            logging.debug(f"Cache key: {cache_key}")
             
-            # Check cache
-            cache_path = self.cache_manager.get_from_cache(file_hash)
-            logging.info(f"Cache path for {file_hash}: {cache_path}")
-            
-            if cache_path and os.path.exists(cache_path):
-                logging.info(f"Cache hit for {os.path.basename(abs_path)} - loading features from cache")
-                try:
-                    # Load features from cache
-                    with np.load(cache_path) as data:
-                        features = {key: data[key] for key in data.files}
-                        logging.info(f"Loaded features from cache: {list(features.keys())}")
-                        return features
-                except Exception as e:
-                    logging.error(f"Error loading cached features: {e}")
-                    # Remove corrupted cache file
-                    self.cache_manager.remove_from_cache(file_hash)
-            else:
-                logging.info(f"Cache miss for {os.path.basename(abs_path)} - features will be extracted")
-                if not cache_path:
-                    logging.info("Cache miss reason: No cache path returned")
-                elif not os.path.exists(cache_path):
-                    logging.info(f"Cache miss reason: Cache file does not exist at {cache_path}")
-                    logging.info(f"Cache directory contents: {os.listdir(self.cache_dir)}")
+            # Check if features exist in cache
+            cache_file = os.path.join(self.cache_dir, f"{cache_key}.npz")
+            if not os.path.exists(cache_file):
+                logging.debug(f"No cached features found for {os.path.basename(abs_path)}")
+                return None
                 
-        except Exception as e:
-            logging.error(f"Error getting features from cache: {e}")
-            logging.exception("Full traceback:")
+            # Load features from cache
+            logging.debug(f"Loading cached features from {cache_file}")
+            with np.load(cache_file) as data:
+                features = {k: data[k] for k in data.files}
+                
+            return features
             
-        return None
-        
-    def cache_features(self, audio_path: str, features: Dict[str, np.ndarray]) -> bool:
+        except Exception as e:
+            logging.error(f"Error getting cached features: {e}")
+            logging.exception("Full traceback:")
+            return None
+            
+    def cache_features(self, audio_path: str, parameters: Dict, features: Dict[str, np.ndarray]) -> bool:
         """Cache features for an audio file
         
         Args:
             audio_path: Path to audio file
+            parameters: Dictionary of feature extraction parameters
             features: Dictionary of features to cache
             
         Returns:
-            True if successfully cached, False otherwise
+            True if features were cached successfully, False otherwise
         """
         try:
-            # Log full path
+            # Get absolute path
             abs_path = os.path.abspath(audio_path)
-            logging.info(f"Caching features for path: {abs_path}")
             
-            # Compute hash of audio file
-            file_hash = self._compute_file_hash(abs_path)
-            logging.info(f"Caching features for {os.path.basename(abs_path)} with hash {file_hash}")
+            # Compute cache key
+            cache_key = self._compute_cache_key(abs_path, parameters)
             
-            # Create cache file name
-            cache_file = f"{file_hash}.npz"
-            temp_path = os.path.join(self.cache_dir, f"temp_{cache_file}")
-            logging.info(f"Saving features to temporary file: {temp_path}")
+            # Save features to cache
+            cache_file = os.path.join(self.cache_dir, f"{cache_key}.npz")
+            np.savez_compressed(cache_file, **features)
             
-            # Ensure cache directory exists
-            os.makedirs(os.path.dirname(temp_path), exist_ok=True)
-            logging.info(f"Cache directory created: {os.path.dirname(temp_path)}")
+            # Update cache index
+            self.index[cache_key] = {
+                'file_path': abs_path,
+                'parameters': parameters,
+                'timestamp': os.path.getmtime(abs_path),
+                'cache_file': cache_file
+            }
             
-            # Save features to temporary file
-            try:
-                np.savez_compressed(temp_path, **features)
-                logging.info(f"Successfully saved features to temporary file")
-            except Exception as e:
-                logging.error(f"Error saving features to cache: {e}")
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
-                return False
+            # Save updated index
+            with open(self.index_path, 'w') as f:
+                json.dump(self.index, f)
             
-            # Add to cache (this will handle cleanup if needed)
-            logging.info(f"Adding file to cache manager: {cache_file}")
-            final_path = self.cache_manager.add_to_cache(
-                file_hash=file_hash,
-                original_file=os.path.basename(abs_path),
-                cache_file=cache_file,
-                metadata={'features': list(features.keys())}
-            )
-            logging.info(f"Cache manager returned final path: {final_path}")
+            return True
             
-            # Ensure final directory exists
-            os.makedirs(os.path.dirname(final_path), exist_ok=True)
-            logging.info(f"Final directory created: {os.path.dirname(final_path)}")
-            
-            # Move temporary file to final location
-            try:
-                os.replace(temp_path, final_path)
-                logging.info(f"Cached features for {os.path.basename(abs_path)}")
-                logging.info(f"Successfully moved cache file to final location: {final_path}")
-                return True
-            except Exception as e:
-                logging.error(f"Error moving cache file to final location: {e}")
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
-                self.cache_manager.remove_from_cache(file_hash)
-                return False
-                
         except Exception as e:
             logging.error(f"Error caching features: {e}")
             logging.exception("Full traceback:")
