@@ -19,6 +19,9 @@ class FeatureCache:
         # Create cache directory if it doesn't exist
         os.makedirs(self.cache_dir, exist_ok=True)
         
+        # Initialize index
+        self.index = {}
+        
         # 2GB limit for features cache (about 20 songs)
         self.cache_manager = CacheManager(self.cache_dir, max_files=20, max_size_gb=2.0, max_age_days=90)
         

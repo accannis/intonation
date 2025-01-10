@@ -1,52 +1,47 @@
 """
-Match phonetic features using pattern detection approach
+Match phonetic patterns in audio using MFCC features and DTW
 """
 
-import numpy as np
-from typing import Tuple, List, Dict
-from dataclasses import dataclass
 import logging
-from scipy.spatial.distance import cdist
+import numpy as np
+from typing import Dict, List, Tuple, NamedTuple
 from scipy.signal import find_peaks
 
-@dataclass
-class PatternInfo:
+class PatternInfo(NamedTuple):
     name: str
     features: np.ndarray
     duration: float
 
-@dataclass
-class DetectionResult:
+class DetectionResult(NamedTuple):
     start_time: float
     end_time: float
     score: float
 
 class PhoneticMatcher:
-    def __init__(self, 
-                 window_size: float = 1.0,
-                 min_pattern_duration: float = 0.1,  # Minimum duration for a pattern in seconds
-                 max_pattern_duration: float = 2.0,  # Maximum duration for a pattern in seconds
-                 dtw_window: float = 0.2,  # DTW window constraint in seconds
-                 peak_height: float = 20,  # Minimum peak height for pattern detection
-                 peak_distance: float = 0.5,  # Minimum distance between peaks in seconds
-                 score_threshold: float = 20):  # Minimum score for a detection
+    """Match phonetic patterns in audio using MFCC features and DTW"""
+    
+    def __init__(self,
+                 window_size: float = 0.5,
+                 min_pattern_duration: float = 0.2,
+                 max_pattern_duration: float = 2.0,
+                 dtw_window: float = 0.1,
+                 peak_height: float = 70.0,
+                 score_threshold: float = 50.0):
         """Initialize phonetic matcher
         
         Args:
-            window_size: Size of the sliding window in seconds
-            min_pattern_duration: Minimum duration for a pattern in seconds
-            max_pattern_duration: Maximum duration for a pattern in seconds
-            dtw_window: DTW window constraint in seconds (allows for timing variations)
-            peak_height: Minimum peak height for pattern detection (0-100)
-            peak_distance: Minimum distance between peaks in seconds
-            score_threshold: Minimum score for a detection
+            window_size: Size of sliding window in seconds
+            min_pattern_duration: Minimum pattern duration in seconds
+            max_pattern_duration: Maximum pattern duration in seconds
+            dtw_window: DTW window size in seconds
+            peak_height: Minimum peak height for detection
+            score_threshold: Minimum score threshold for detection
         """
         self.window_size = window_size
-        self.min_pattern_duration = 0.1  # Override to 100ms
+        self.min_pattern_duration = min_pattern_duration
         self.max_pattern_duration = max_pattern_duration
         self.dtw_window = dtw_window
         self.peak_height = peak_height
-        self.peak_distance = peak_distance
         self.score_threshold = score_threshold
         
         # Store reference patterns
@@ -111,149 +106,94 @@ class PhoneticMatcher:
             logging.error(f"Pattern extraction failed: {e}")
             logging.exception("Full traceback:")
             
-    def _normalize_features(self, features: np.ndarray) -> np.ndarray:
-        """Normalize features using z-score normalization
+    def normalize_features(self, features: np.ndarray) -> np.ndarray:
+        """Normalize MFCC features for DTW comparison
         
         Args:
-            features: Input features (n_features x n_frames)
+            features: MFCC features array
             
         Returns:
-            Normalized features
-        """
-        mean = np.mean(features, axis=1, keepdims=True)
-        std = np.std(features, axis=1, keepdims=True) + 1e-8
-        return (features - mean) / std
-
-    def _dtw_distance(self, x: np.ndarray, y: np.ndarray, window: int) -> float:
-        """Calculate DTW distance between two sequences with window constraint
-        
-        Args:
-            x: First sequence (n_features x n_frames)
-            y: Second sequence (n_features x n_frames)
-            window: Maximum allowed deviation in frames
-            
-        Returns:
-            DTW distance between sequences (0 = perfect match, 1 = no match)
+            Normalized features array
         """
         try:
-            logging.info(f"DTW input shapes - x: {x.shape}, y: {y.shape}")
+            # Normalize each coefficient independently
+            mean = np.mean(features, axis=1, keepdims=True)
+            std = np.std(features, axis=1, keepdims=True)
             
-            # Ensure both sequences have the same number of features
-            min_features = min(x.shape[0], y.shape[0])
-            x = x[:min_features]
-            y = y[:min_features]
+            # Handle zero standard deviation
+            std[std == 0] = 1.0
             
-            n, m = x.shape[1], y.shape[1]
+            return (features - mean) / std
             
-            # Initialize cost matrix
-            D = np.full((n + 1, m + 1), np.inf)
-            D[0, 0] = 0
+        except Exception as e:
+            logging.error(f"Feature normalization failed: {e}")
+            logging.exception("Full traceback:")
+            return features
             
-            # Precompute frame-wise distances
-            # Using Euclidean distance between normalized frames
-            distances = np.zeros((n, m))
-            for i in range(n):
-                for j in range(m):
-                    diff = x[:, i] - y[:, j]
-                    distances[i, j] = np.sqrt(np.sum(diff * diff))
+    def compute_dtw_distance(self, pattern: np.ndarray, window: np.ndarray, window_size: int) -> float:
+        """Compute DTW distance between pattern and window
+        
+        Args:
+            pattern: Pattern MFCC features
+            window: Window MFCC features
+            window_size: DTW window size in frames
+            
+        Returns:
+            DTW distance (0-100, higher is better)
+        """
+        try:
+            # Compute frame-wise Euclidean distances
+            distances = []
+            for i in range(pattern.shape[1]):
+                frame_dists = []
+                for j in range(window.shape[1]):
+                    dist = np.sqrt(np.sum((pattern[:, i] - window[:, j]) ** 2))
+                    frame_dists.append(dist)
+                distances.append(frame_dists)
+                
+            distances = np.array(distances)
             
             # Normalize distances to [0, 1]
             if np.max(distances) > 0:
                 distances = distances / np.max(distances)
+                
+            # Initialize cost matrix
+            n, m = distances.shape
+            D = np.full((n + 1, m + 1), np.inf)
+            D[0, 0] = 0
             
-            logging.info(f"Frame distance stats - min: {np.min(distances):.3f}, "
-                       f"max: {np.max(distances):.3f}, mean: {np.mean(distances):.3f}, "
-                       f"std: {np.std(distances):.3f}")
-            
-            # Fill the cost matrix
+            # Fill the cost matrix with window constraint
             for i in range(1, n + 1):
                 # Calculate window bounds
-                if window:
-                    start = max(1, i - window)
-                    end = min(m + 1, i + window + 1)
+                if window_size:
+                    start = max(1, i - window_size)
+                    end = min(m + 1, i + window_size + 1)
                 else:
                     start, end = 1, m + 1
-                
+                    
                 for j in range(start, end):
-                    # Get frame-wise distance
                     cost = distances[i-1, j-1]
+                    D[i, j] = cost + min(
+                        D[i-1, j],    # insertion
+                        D[i, j-1],    # deletion
+                        D[i-1, j-1]   # match
+                    )
                     
-                    # Calculate possible previous steps
-                    candidates = []
-                    if i > 1 and j > 1:
-                        candidates.append(D[i-1, j-1])  # diagonal
-                    if i > 1:
-                        candidates.append(D[i-1, j])    # vertical
-                    if j > 1:
-                        candidates.append(D[i, j-1])    # horizontal
-                    
-                    # Update cost matrix
-                    if candidates:
-                        D[i, j] = cost + min(candidates)
-                    else:
-                        D[i, j] = cost
+            # Return normalized path cost
+            path_cost = D[n, m] / n
             
-            # Extract the optimal warping path
-            i, j = n, m
-            path_length = 0
-            path_cost = 0
-            path_distances = []
+            # Convert distance to score (0-100)
+            score = 100 * (1 - path_cost)
             
-            while i > 0 and j > 0:
-                path_length += 1
-                current_cost = distances[i-1, j-1]
-                path_cost += current_cost
-                path_distances.append(current_cost)
-                
-                # Find best previous step
-                if i > 1 and j > 1:
-                    step = np.argmin([D[i-1, j-1], D[i-1, j], D[i, j-1]])
-                    if step == 0:
-                        i, j = i-1, j-1
-                    elif step == 1:
-                        i -= 1
-                    else:
-                        j -= 1
-                elif i > 1:
-                    i -= 1
-                else:
-                    j -= 1
+            # Apply sigmoid to make scores more extreme
+            score = 100 / (1 + np.exp(-0.2 * (score - 30)))  # Adjust slope and midpoint
             
-            if path_length == 0:
-                logging.warning("Zero-length path in DTW")
-                return 1.0
-            
-            # Calculate final score components
-            avg_path_cost = path_cost / path_length
-            length_ratio = min(n, m) / max(n, m)
-            
-            # Combine scores with weights
-            # Lower cost = better match, so we subtract from 1
-            path_score = 1.0 - avg_path_cost
-            final_score = 0.7 * path_score + 0.3 * length_ratio
-            
-            logging.info(f"DTW path stats - length: {path_length}, "
-                       f"avg_cost: {avg_path_cost:.3f}, "
-                       f"path_score: {path_score:.3f}, "
-                       f"length_ratio: {length_ratio:.3f}, "
-                       f"final_score: {final_score:.3f}")
-            
-            logging.debug(f"Path distances - min: {min(path_distances):.3f}, "
-                       f"max: {max(path_distances):.3f}, "
-                       f"mean: {np.mean(path_distances):.3f}, "
-                       f"std: {np.std(path_distances):.3f}")
-            
-            # For identical sequences, we should get a perfect score
-            if np.array_equal(x, y):
-                logging.info("Sequences are identical, returning perfect score")
-                return 0.0
-            
-            return 1.0 - final_score
+            return score
             
         except Exception as e:
-            logging.error(f"DTW calculation failed: {e}")
+            logging.error(f"DTW distance computation failed: {e}")
             logging.exception("Full traceback:")
-            return 1.0
+            return 0.0
             
     def detect_pattern(self, pattern: PatternInfo, input_mfcc: np.ndarray, frames_per_second: float) -> List[DetectionResult]:
         """Detect occurrences of a pattern in the input MFCC features using DTW.
@@ -264,7 +204,7 @@ class PhoneticMatcher:
             frames_per_second: Frames per second of input audio
             
         Returns:
-            List of DetectionResult objects containing match locations and scores
+            List of detection results (start_time, end_time, score)
         """
         try:
             # Calculate frames per window and pattern length in frames
@@ -286,55 +226,55 @@ class PhoneticMatcher:
             input_features = input_mfcc[:min_features]
             
             # Normalize pattern features
-            pattern_features = self._normalize_features(pattern_features)
+            pattern_norm = self.normalize_features(pattern_features)
             
-            # Calculate DTW distances for each window
+            # Initialize arrays for DTW distances and timestamps
             distances = []
             timestamps = []
             
-            # Debug first few windows
-            debug_windows = 3
-            window_count = 0
-            
+            # Slide window over input
             for start_frame in range(0, input_features.shape[1] - pattern_frames + 1, frames_per_window):
-                end_frame = start_frame + pattern_frames
-                window = input_features[:, start_frame:end_frame]
-                
-                # Skip if window is too small
-                if window.shape[1] < pattern_frames // 2:
+                try:
+                    # Extract window
+                    end_frame = start_frame + pattern_frames
+                    window = input_features[:, start_frame:end_frame]
+                    
+                    # Skip if window is too short
+                    if window.shape[1] < pattern_frames:
+                        continue
+                        
+                    # Normalize window features
+                    window_norm = self.normalize_features(window)
+                    
+                    # Compute DTW distance
+                    distance = self.compute_dtw_distance(
+                        pattern_norm,
+                        window_norm,
+                        dtw_window_frames
+                    )
+                    
+                    # Store distance and timestamp
+                    distances.append(distance)
+                    timestamps.append(start_frame / frames_per_second)
+                    
+                except Exception as e:
+                    logging.error(f"Window processing failed at {start_frame}: {e}")
+                    logging.exception("Full traceback:")
                     continue
                     
-                # Normalize window features
-                window = self._normalize_features(window)
-                
-                # Debug first few windows
-                if window_count < debug_windows:
-                    logging.debug(f"Window {window_count} - "
-                               f"start: {start_frame}, end: {end_frame}, "
-                               f"shape: {window.shape}, "
-                               f"range: [{np.min(window):.3f}, {np.max(window):.3f}], "
-                               f"mean: {np.mean(window):.3f}")
-                    window_count += 1
-                
-                # Calculate DTW distance
-                distance = self._dtw_distance(pattern_features, window, dtw_window_frames)
-                distances.append(distance)
-                timestamps.append(start_frame / frames_per_second)
-                
-                logging.debug(f"Window {start_frame}-{end_frame} DTW distance: {distance:.3f}")
-                
             if distances:
                 # Convert distances to scores (0-100)
-                scores = np.array([(1.0 - d) * 100 for d in distances])
+                scores = np.array(distances)
                 
                 logging.info(f"Pattern {pattern.name} - score stats: "
                            f"min={np.min(scores):.1f}, max={np.max(scores):.1f}, "
                            f"mean={np.mean(scores):.1f}, std={np.std(scores):.1f}")
                 
-                # If max score is high enough, just use that window
-                max_score = np.max(scores)
+                # Find highest scoring detection
+                max_idx = np.argmax(scores)
+                max_score = scores[max_idx]
+                
                 if max_score >= self.peak_height:
-                    max_idx = np.argmax(scores)
                     logging.info(f"Found high score {max_score:.1f} at time {timestamps[max_idx]:.2f}s")
                     return [DetectionResult(
                         start_time=timestamps[max_idx],
@@ -361,14 +301,20 @@ class PhoneticMatcher:
             input_mfcc: Input MFCC features to compare (n_mfcc x time)
             
         Returns:
-            Tuple of (scores, times) where:
-                scores: List of similarity scores (0-100) for each window
+            Tuple of:
+                scores: List of similarity scores (0-100)
                 times: List of time points corresponding to the scores
         """
         try:
+            # For CLI usage without patterns, create a single pattern from the reference
             if not self.reference_patterns:
-                logging.error("No reference patterns extracted. Call extract_patterns() first.")
-                return [0.0], [0.0]
+                pattern_id = "reference"
+                duration = input_mfcc.shape[1] * 0.05  # Assuming 50ms per frame
+                self.reference_patterns[pattern_id] = PatternInfo(
+                    name=pattern_id,
+                    features=reference_mfcc,
+                    duration=duration
+                )
                 
             logging.info(f"Starting pattern matching with {len(self.reference_patterns)} reference patterns")
             logging.info(f"Reference MFCC shape: {reference_mfcc.shape}")
@@ -403,15 +349,7 @@ class PhoneticMatcher:
                 logging.warning("No pattern detections found, returning zero score")
                 return [0.0], [0.0]
                 
-            # Sort by time
-            times_scores = sorted(zip(all_times, all_scores))
-            all_times, all_scores = zip(*times_scores)
-            
-            logging.info(f"Final match results - {len(all_scores)} total detections, "
-                        f"score range: [{min(all_scores):.1f}, {max(all_scores):.1f}], "
-                        f"mean: {np.mean(all_scores):.1f}")
-            
-            return list(all_scores), list(all_times)
+            return all_scores, all_times
             
         except Exception as e:
             logging.error(f"Pattern matching failed: {e}")
