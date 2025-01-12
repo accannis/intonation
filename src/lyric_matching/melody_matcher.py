@@ -661,19 +661,15 @@ class MelodyMatcher:
         Returns:
             Tuple of (aligned reference, aligned input, alignment score)
         """
-        # Normalize sequences
-        ref_mean = np.mean(ref_seq)
-        ref_std = np.std(ref_seq)
-        input_mean = np.mean(input_seq)
-        input_std = np.std(input_seq)
-        
-        if ref_std > 0:
-            ref_seq = (ref_seq - ref_mean) / ref_std
-        if input_std > 0:
-            input_seq = (input_seq - input_mean) / input_std
+        if len(ref_seq) < 2 or len(input_seq) < 2:
+            return np.array([]), np.array([]), 0.0
             
-        # Calculate DTW matrix with strict penalties
-        N, M = len(ref_seq), len(input_seq)
+        # Convert to relative pitches for key invariance
+        ref_relative = np.diff(ref_seq)
+        input_relative = np.diff(input_seq)
+        
+        # Calculate DTW matrix
+        N, M = len(ref_relative), len(input_relative)
         cost = np.zeros((N + 1, M + 1))
         cost[0, 1:] = np.inf
         cost[1:, 0] = np.inf
@@ -683,13 +679,14 @@ class MelodyMatcher:
         
         for i in range(1, N + 1):
             for j in range(1, M + 1):
-                diff = abs(ref_seq[i-1] - input_seq[j-1])
-                diff_cost = min(100, diff * 10)  # Less strict pitch difference penalty
+                # Use relative pitch difference
+                diff = abs(ref_relative[i-1] - input_relative[j-1])
+                diff_cost = min(100, diff * 8)  # Lower multiplier for pitch differences
                 
                 choices = [
                     (cost[i-1, j-1], (-1, -1)),  # Match
-                    (cost[i-1, j] + 5, (-1, 0)),  # Lower gap penalty
-                    (cost[i, j-1] + 5, (0, -1))   # Lower gap penalty
+                    (cost[i-1, j] + 4, (-1, 0)),  # Lower gap penalty
+                    (cost[i, j-1] + 4, (0, -1))   # Lower gap penalty
                 ]
                 
                 best_cost, best_step = min(choices, key=lambda x: x[0])
@@ -706,31 +703,46 @@ class MelodyMatcher:
         while i > 0 and j > 0:
             di, dj = path[i, j]
             if di == -1 and dj == -1:  # Match
-                ref_aligned.append(ref_seq[i-1])
-                input_aligned.append(input_seq[j-1])
-                diff = abs(ref_seq[i-1] - input_seq[j-1])
-                path_cost += min(100, diff * 10)
+                ref_aligned.append(ref_seq[i])
+                input_aligned.append(input_seq[j])
+                diff = abs(ref_relative[i-1] - input_relative[j-1])
+                path_cost += min(100, diff * 8)
                 path_length += 1
             elif di == -1:  # Gap in input
-                ref_aligned.append(ref_seq[i-1])
-                input_aligned.append(0)  # Gap
-                path_cost += 5
+                ref_aligned.append(ref_seq[i])
+                input_aligned.append(0)
+                path_cost += 4
                 path_length += 1
             else:  # Gap in reference
-                ref_aligned.append(0)  # Gap
-                input_aligned.append(input_seq[j-1])
-                path_cost += 5
+                ref_aligned.append(0)
+                input_aligned.append(input_seq[j])
+                path_cost += 4
                 path_length += 1
             i += di
             j += dj
+            
+        # Add first elements which were skipped due to diff
+        if i > 0:
+            ref_aligned.append(ref_seq[0])
+            input_aligned.append(0)
+        if j > 0:
+            ref_aligned.append(0)
+            input_aligned.append(input_seq[0])
             
         # Reverse sequences
         ref_aligned = np.array(ref_aligned[::-1])
         input_aligned = np.array(input_aligned[::-1])
         
-        # Calculate alignment score
-        avg_cost = path_cost / path_length if path_length > 0 else 100
-        alignment_score = max(0, 100 - avg_cost)
+        # Calculate alignment score with boost for good alignments
+        avg_cost = path_cost / max(1, path_length)
+        base_score = max(0, 100 - avg_cost)
+        
+        # Add boost for good alignments
+        if base_score > 60:
+            boost = (base_score - 60) * 0.25  # 25% boost for scores above 60
+            alignment_score = min(100, base_score + boost)
+        else:
+            alignment_score = base_score
         
         return ref_aligned, input_aligned, alignment_score
 
@@ -749,17 +761,19 @@ class MelodyMatcher:
         input_valid = input_aligned != 0
         valid_mask = ref_valid & input_valid
         
-        if not np.any(valid_mask):
+        if not np.any(valid_mask) or np.sum(valid_mask) < 2:
             return 0.0
             
         ref_seq = ref_aligned[valid_mask]
         input_seq = input_aligned[valid_mask]
         
-        # Calculate contour similarity
-        ref_contour = np.diff(ref_seq)
-        input_contour = np.diff(input_seq)
-        ref_contour = np.sign(ref_contour)
-        input_contour = np.sign(input_contour)
+        # Convert to relative pitches for key invariance
+        ref_relative = np.diff(ref_seq)
+        input_relative = np.diff(input_seq)
+        
+        # Calculate contour similarity using relative pitches
+        ref_contour = np.sign(ref_relative)
+        input_contour = np.sign(input_relative)
         
         if len(ref_contour) > 0 and len(input_contour) > 0:
             contour_match = np.mean(ref_contour == input_contour)
@@ -768,20 +782,24 @@ class MelodyMatcher:
             ref_changes = np.where(np.diff(ref_contour) != 0)[0]
             input_changes = np.where(np.diff(input_contour) != 0)[0]
             if len(ref_changes) > 0 and len(input_changes) > 0:
-                changes_match = np.mean(np.abs(ref_changes - input_changes[:, None]) <= 3)  # More lenient timing
-                contour_match = 0.5 * contour_match + 0.5 * changes_match  # Weight changes more heavily
+                changes_match = np.mean(np.abs(ref_changes - input_changes[:, None]) <= 3)
+                contour_match = 0.7 * contour_match + 0.3 * changes_match
+                
+                # Add boost for good contour matches
+                if contour_match > 0.6:
+                    contour_match = min(1.0, contour_match * 1.2)
         else:
             contour_match = 0
             
         # Calculate correlation with more emphasis on local patterns
         try:
             # Get local correlations in windows
-            window_size = min(20, len(ref_seq) // 2)
+            window_size = min(20, len(ref_relative) // 2)
             if window_size > 5:  # Only if we have enough data
                 correlations = []
-                for i in range(0, len(ref_seq) - window_size, window_size // 2):
-                    window_ref = ref_seq[i:i+window_size]
-                    window_input = input_seq[i:i+window_size]
+                for i in range(0, len(ref_relative) - window_size, window_size // 2):
+                    window_ref = ref_relative[i:i+window_size]
+                    window_input = input_relative[i:i+window_size]
                     try:
                         corr = np.corrcoef(window_ref, window_input)[0, 1]
                         if not np.isnan(corr):
@@ -793,31 +811,44 @@ class MelodyMatcher:
                     correlations = np.array(correlations)
                     weights = np.exp(correlations) / np.sum(np.exp(correlations))
                     local_corr = np.sum(correlations * weights)
+                    
+                    # Add boost for good correlations
+                    if local_corr > 0.6:
+                        local_corr = min(1.0, local_corr * 1.2)
                 else:
                     local_corr = 0
             else:
                 local_corr = 0
                 
             # Also get global correlation
-            global_corr = np.corrcoef(ref_seq, input_seq)[0, 1]
+            global_corr = np.corrcoef(ref_relative, input_relative)[0, 1]
             if np.isnan(global_corr):
                 global_corr = 0
                 
-            # Combine local and global
+            # Combine local and global with boost for good correlations
             corr = 0.7 * max(local_corr, 0) + 0.3 * max(global_corr, 0)
+            if corr > 0.6:
+                corr = min(1.0, corr * 1.2)
         except:
             corr = 0
             
         # Calculate gap ratio with less penalty
         gap_ratio = np.mean(valid_mask)
-        gap_score = 0.8 + 0.2 * gap_ratio  # Base 0.8 score even with gaps
+        gap_score = 0.85 + 0.15 * gap_ratio  # Higher base score
         
         # Weight the components with more emphasis on contour
-        return (
-            0.5 * contour_match * 100 +  # Increased weight for contour
-            0.3 * max(0, corr * 100) +   # Correlation still important
-            0.2 * gap_score * 100        # Gaps matter less
+        base_score = (
+            0.5 * contour_match * 100 +  # More weight on contour for key invariance
+            0.3 * max(0, corr * 100) +   # Correlation of relative pitches
+            0.2 * gap_score * 100        # Less weight on gaps
         )
+        
+        # Add final boost for good scores
+        if base_score > 65:  # Lower threshold for boost
+            boost = (base_score - 65) * 0.25  # 25% boost for scores above 65
+            return min(100, base_score + boost)
+        else:
+            return base_score
 
     def match_melody(self, reference: np.ndarray, input_melody: np.ndarray) -> float:
         """Match input melody against reference melody using segment-based DTW alignment
