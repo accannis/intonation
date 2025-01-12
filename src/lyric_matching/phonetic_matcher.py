@@ -23,7 +23,7 @@ class PhoneticMatcher:
     def __init__(self,
                  window_size: float = 0.5,
                  min_pattern_duration: float = 0.2,
-                 max_pattern_duration: float = 2.0,
+                 max_pattern_duration: float = 60.0,
                  dtw_window: float = 0.1,
                  peak_height: float = 70.0,
                  score_threshold: float = 50.0):
@@ -47,64 +47,51 @@ class PhoneticMatcher:
         # Store reference patterns
         self.reference_patterns: Dict[str, PatternInfo] = {}
         
-    def extract_patterns(self, reference_mfcc: np.ndarray, pattern_times: List[Tuple[str, float, float]]):
-        """Extract and store reference patterns
+    def extract_patterns(self, mfcc: np.ndarray, duration: float = None, frames_per_second: float = None) -> List[PatternInfo]:
+        """Extract phonetic patterns from MFCC features
         
         Args:
-            reference_mfcc: Reference MFCC features (n_mfcc x time)
-            pattern_times: List of (pattern_id, start_time, end_time) tuples
+            mfcc: MFCC features (N x M array)
+            duration: Duration of audio in seconds
+            frames_per_second: Number of frames per second
+            
+        Returns:
+            List of PatternInfo objects
         """
         try:
-            logging.info(f"Extracting patterns from reference MFCC shape: {reference_mfcc.shape}")
+            # Handle duration as list, tuple, or scalar
+            if isinstance(duration, (list, tuple)):
+                duration = duration[0]
+                
+            if duration is None and frames_per_second is None:
+                # Default to 20 fps if neither is provided
+                frames_per_second = 20.0
+                duration = mfcc.shape[1] / frames_per_second
+            elif duration is None:
+                duration = mfcc.shape[1] / frames_per_second
+            elif frames_per_second is None:
+                frames_per_second = mfcc.shape[1] / float(duration)
+                
+            logging.info(f"Reference audio - frames: {mfcc.shape[1]}, duration: {duration:.2f}s, frames_per_second: {frames_per_second}")
             
-            # Calculate frames per second
-            total_frames = reference_mfcc.shape[1]
-            total_duration = pattern_times[-1][2]  # Use last end time as total duration
-            frames_per_second = total_frames / total_duration
+            # Create a single pattern from the entire audio
+            pattern_id = "full_audio"
+            pattern_info = PatternInfo(
+                name=pattern_id,
+                features=mfcc,
+                duration=float(duration)
+            )
             
-            logging.info(f"Reference audio - frames: {total_frames}, "
-                        f"duration: {total_duration:.2f}s, "
-                        f"frames_per_second: {frames_per_second:.1f}")
+            logging.info(f"Extracted pattern {pattern_id} - time: [0.00, {duration:.2f}], frames: [0, {mfcc.shape[1]}], shape: {mfcc.shape}")
             
-            # Extract each pattern
-            for pattern_id, start_time, end_time in pattern_times:
-                try:
-                    # Convert times to frame indices
-                    start_frame = int(start_time * frames_per_second)
-                    end_frame = int(end_time * frames_per_second)
-                    duration = end_time - start_time
-                    
-                    # Skip if pattern is too short or too long
-                    if duration < self.min_pattern_duration or duration > self.max_pattern_duration:
-                        logging.warning(f"Pattern {pattern_id} duration {duration:.2f}s outside range "
-                                     f"[{self.min_pattern_duration}, {self.max_pattern_duration}], skipping")
-                        continue
-                    
-                    # Extract pattern features
-                    pattern_features = reference_mfcc[:, start_frame:end_frame]
-                    
-                    logging.info(f"Extracted pattern {pattern_id} - "
-                               f"time: [{start_time:.2f}, {end_time:.2f}], "
-                               f"frames: [{start_frame}, {end_frame}], "
-                               f"shape: {pattern_features.shape}")
-                    
-                    # Store pattern
-                    self.reference_patterns[pattern_id] = PatternInfo(
-                        name=pattern_id,
-                        features=pattern_features,
-                        duration=duration
-                    )
-                    
-                except Exception as e:
-                    logging.error(f"Failed to extract pattern {pattern_id}: {e}")
-                    logging.exception("Full traceback:")
-                    continue
-            
+            self.reference_patterns[pattern_id] = pattern_info
             logging.info(f"Successfully extracted {len(self.reference_patterns)} patterns")
+            return [pattern_info]
             
         except Exception as e:
-            logging.error(f"Pattern extraction failed: {e}")
+            logging.error(f"Error extracting patterns: {e}")
             logging.exception("Full traceback:")
+            return []
             
     def normalize_features(self, features: np.ndarray) -> np.ndarray:
         """Normalize MFCC features for DTW comparison
@@ -130,7 +117,7 @@ class PhoneticMatcher:
             logging.exception("Full traceback:")
             return features
             
-    def compute_dtw_distance(self, pattern: np.ndarray, window: np.ndarray, window_size: int) -> float:
+    def compute_dtw_distance(self, pattern: np.ndarray, window: np.ndarray, window_size: int = None) -> float:
         """Compute DTW distance between pattern and window
         
         Args:
@@ -142,25 +129,24 @@ class PhoneticMatcher:
             DTW distance (0-100, higher is better)
         """
         try:
-            # Compute frame-wise Euclidean distances
-            distances = []
-            for i in range(pattern.shape[1]):
-                frame_dists = []
-                for j in range(window.shape[1]):
-                    dist = np.sqrt(np.sum((pattern[:, i] - window[:, j]) ** 2))
-                    frame_dists.append(dist)
-                distances.append(frame_dists)
-                
-            distances = np.array(distances)
+            # Normalize features
+            pattern_norm = self.normalize_features(pattern)
+            window_norm = self.normalize_features(window)
             
-            # Normalize distances to [0, 1]
-            if np.max(distances) > 0:
-                distances = distances / np.max(distances)
-                
+            # Get dimensions
+            n, m = pattern_norm.shape[1], window_norm.shape[1]
+            
             # Initialize cost matrix
-            n, m = distances.shape
             D = np.full((n + 1, m + 1), np.inf)
             D[0, 0] = 0
+            
+            # Compute pairwise distances
+            distances = np.zeros((n, m))
+            for i in range(n):
+                for j in range(m):
+                    # Use Euclidean distance between feature vectors
+                    diff = pattern_norm[:, i] - window_norm[:, j]
+                    distances[i, j] = np.sqrt(np.mean(diff * diff))
             
             # Fill the cost matrix with window constraint
             for i in range(1, n + 1):
@@ -180,13 +166,13 @@ class PhoneticMatcher:
                     )
                     
             # Return normalized path cost
-            path_cost = D[n, m] / n
+            path_cost = D[n, m] / max(n, m)  # Normalize by max length
             
             # Convert distance to score (0-100)
             score = 100 * (1 - path_cost)
             
             # Apply sigmoid to make scores more extreme
-            score = 100 / (1 + np.exp(-0.2 * (score - 30)))  # Adjust slope and midpoint
+            score = 100 / (1 + np.exp(-0.1 * (score - 50)))  # Adjust slope and midpoint
             
             return score
             
@@ -207,83 +193,60 @@ class PhoneticMatcher:
             List of detection results (start_time, end_time, score)
         """
         try:
-            # Calculate frames per window and pattern length in frames
-            frames_per_window = int(self.window_size * frames_per_second)
             pattern_frames = pattern.features.shape[1]
-            
-            # Calculate DTW window size in frames
+            frames_per_window = min(pattern_frames, input_mfcc.shape[1])
             dtw_window_frames = int(self.dtw_window * frames_per_second)
+            logging.info(f"Pattern detection - pattern: {pattern.name}, pattern shape: {pattern.features.shape}, "
+                       f"input shape: {input_mfcc.shape}, frames_per_window: {frames_per_window}, "
+                       f"dtw_window_frames: {dtw_window_frames}")
             
-            logging.info(f"Pattern detection - pattern: {pattern.name}, "
-                        f"pattern shape: {pattern.features.shape}, "
-                        f"input shape: {input_mfcc.shape}, "
-                        f"frames_per_window: {frames_per_window}, "
-                        f"dtw_window_frames: {dtw_window_frames}")
+            # Handle case where input is shorter than pattern
+            if input_mfcc.shape[1] < pattern_frames:
+                # Compare entire input to pattern
+                score = self.compute_dtw_distance(pattern.features, input_mfcc, dtw_window_frames)
+                if score >= self.score_threshold:
+                    logging.info(f"Found high score {score:.1f} at time 0.00s")
+                    return [DetectionResult(0.0, pattern.duration, score)]
+                return []
             
-            # Ensure both sequences have the same number of features
-            min_features = min(pattern.features.shape[0], input_mfcc.shape[0])
-            pattern_features = pattern.features[:min_features]
-            input_features = input_mfcc[:min_features]
+            # For efficiency, only check every N frames
+            stride = max(1, int(frames_per_second * 0.5))  # Check every 0.5 seconds
+            n_windows = (input_mfcc.shape[1] - frames_per_window) // stride + 1
+            scores = np.zeros(n_windows)
             
-            # Normalize pattern features
-            pattern_norm = self.normalize_features(pattern_features)
+            # Compute DTW distance for each window
+            for i in range(n_windows):
+                start_idx = i * stride
+                window = input_mfcc[:, start_idx:start_idx+frames_per_window]
+                scores[i] = self.compute_dtw_distance(pattern.features, window, dtw_window_frames)
+                
+                # Early stopping if we find a very good match
+                if scores[i] > 95:
+                    logging.info(f"Found excellent match ({scores[i]:.1f}), stopping early")
+                    break
             
-            # Initialize arrays for DTW distances and timestamps
-            distances = []
-            timestamps = []
-            
-            # Slide window over input
-            for start_frame in range(0, input_features.shape[1] - pattern_frames + 1, frames_per_window):
-                try:
-                    # Extract window
-                    end_frame = start_frame + pattern_frames
-                    window = input_features[:, start_frame:end_frame]
-                    
-                    # Skip if window is too short
-                    if window.shape[1] < pattern_frames:
-                        continue
+            # Find peaks in scores
+            if len(scores) > 0:
+                logging.info(f"Pattern {pattern.name} - score stats: min={np.min(scores):.1f}, "
+                           f"max={np.max(scores):.1f}, mean={np.mean(scores):.1f}, std={np.std(scores):.1f}")
+                
+                # Find peaks above threshold
+                peaks, _ = find_peaks(scores, height=self.peak_height)
+                
+                # Convert peaks to time points
+                results = []
+                for peak in peaks:
+                    if scores[peak] >= self.score_threshold:
+                        start_time = (peak * stride) / frames_per_second
+                        end_time = start_time + pattern.duration
+                        logging.info(f"Found high score {scores[peak]:.1f} at time {start_time:.2f}s")
+                        results.append(DetectionResult(start_time, end_time, scores[peak]))
                         
-                    # Normalize window features
-                    window_norm = self.normalize_features(window)
-                    
-                    # Compute DTW distance
-                    distance = self.compute_dtw_distance(
-                        pattern_norm,
-                        window_norm,
-                        dtw_window_frames
-                    )
-                    
-                    # Store distance and timestamp
-                    distances.append(distance)
-                    timestamps.append(start_frame / frames_per_second)
-                    
-                except Exception as e:
-                    logging.error(f"Window processing failed at {start_frame}: {e}")
-                    logging.exception("Full traceback:")
-                    continue
-                    
-            if distances:
-                # Convert distances to scores (0-100)
-                scores = np.array(distances)
-                
-                logging.info(f"Pattern {pattern.name} - score stats: "
-                           f"min={np.min(scores):.1f}, max={np.max(scores):.1f}, "
-                           f"mean={np.mean(scores):.1f}, std={np.std(scores):.1f}")
-                
-                # Find highest scoring detection
-                max_idx = np.argmax(scores)
-                max_score = scores[max_idx]
-                
-                if max_score >= self.peak_height:
-                    logging.info(f"Found high score {max_score:.1f} at time {timestamps[max_idx]:.2f}s")
-                    return [DetectionResult(
-                        start_time=timestamps[max_idx],
-                        end_time=timestamps[max_idx] + pattern.duration,
-                        score=max_score
-                    )]
-                else:
-                    logging.warning(f"Pattern {pattern.name} - no scores above threshold {self.peak_height}")
-                    return []
+                        # Only keep the best match
+                        if scores[peak] > 90:
+                            break
+                            
+                return results
             else:
                 logging.warning(f"Pattern {pattern.name} - no valid windows found")
                 return []
@@ -292,6 +255,33 @@ class PhoneticMatcher:
             logging.error(f"Pattern detection failed: {e}")
             logging.exception("Full traceback:")
             return []
+            
+    def match_patterns(self, input_features: np.ndarray) -> float:
+        """Match input features against reference patterns
+        
+        Args:
+            input_features: Input MFCC features (N x M array)
+            
+        Returns:
+            Score between 0 and 100 indicating how well the patterns match
+        """
+        if not self.reference_patterns:
+            return 0.0
+            
+        # Find best matches for each pattern
+        total_score = 0.0
+        n_matches = 0
+        
+        for pattern in self.reference_patterns.values():
+            pattern_score = self.detect_pattern(pattern, input_features, input_features.shape[1] / pattern.duration)
+            if pattern_score:
+                total_score += pattern_score[0].score
+                n_matches += 1
+                
+        if n_matches == 0:
+            return 0.0
+            
+        return total_score / n_matches
             
     def match(self, reference_mfcc: np.ndarray, input_mfcc: np.ndarray) -> Tuple[List[float], List[float]]:
         """Match input MFCCs against reference patterns
