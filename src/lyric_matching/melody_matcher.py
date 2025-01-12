@@ -769,25 +769,54 @@ class MelodyMatcher:
             input_changes = np.where(np.diff(input_contour) != 0)[0]
             if len(ref_changes) > 0 and len(input_changes) > 0:
                 changes_match = np.mean(np.abs(ref_changes - input_changes[:, None]) <= 3)  # More lenient timing
-                contour_match = 0.6 * contour_match + 0.4 * changes_match  # Weight changes more
+                contour_match = 0.5 * contour_match + 0.5 * changes_match  # Weight changes more heavily
         else:
             contour_match = 0
             
-        # Calculate correlation
+        # Calculate correlation with more emphasis on local patterns
         try:
-            corr = np.corrcoef(ref_seq, input_seq)[0, 1]
-            if np.isnan(corr):
-                corr = 0
+            # Get local correlations in windows
+            window_size = min(20, len(ref_seq) // 2)
+            if window_size > 5:  # Only if we have enough data
+                correlations = []
+                for i in range(0, len(ref_seq) - window_size, window_size // 2):
+                    window_ref = ref_seq[i:i+window_size]
+                    window_input = input_seq[i:i+window_size]
+                    try:
+                        corr = np.corrcoef(window_ref, window_input)[0, 1]
+                        if not np.isnan(corr):
+                            correlations.append(corr)
+                    except:
+                        continue
+                if correlations:
+                    # Weight higher correlations more
+                    correlations = np.array(correlations)
+                    weights = np.exp(correlations) / np.sum(np.exp(correlations))
+                    local_corr = np.sum(correlations * weights)
+                else:
+                    local_corr = 0
+            else:
+                local_corr = 0
+                
+            # Also get global correlation
+            global_corr = np.corrcoef(ref_seq, input_seq)[0, 1]
+            if np.isnan(global_corr):
+                global_corr = 0
+                
+            # Combine local and global
+            corr = 0.7 * max(local_corr, 0) + 0.3 * max(global_corr, 0)
         except:
             corr = 0
             
-        # Calculate gap ratio
+        # Calculate gap ratio with less penalty
         gap_ratio = np.mean(valid_mask)
+        gap_score = 0.8 + 0.2 * gap_ratio  # Base 0.8 score even with gaps
         
+        # Weight the components with more emphasis on contour
         return (
-            0.4 * contour_match * 100 +
-            0.3 * max(0, corr * 100) +
-            0.3 * gap_ratio * 100
+            0.5 * contour_match * 100 +  # Increased weight for contour
+            0.3 * max(0, corr * 100) +   # Correlation still important
+            0.2 * gap_score * 100        # Gaps matter less
         )
 
     def match_melody(self, reference: np.ndarray, input_melody: np.ndarray) -> float:
@@ -888,41 +917,31 @@ class MelodyMatcher:
         # Calculate coverage ratio using unique covered frames
         coverage_ratio = len(covered_ref_frames) / len(ref_pitch)
         
-        # Apply length and coverage penalties with adjusted thresholds
-        if len_ratio < 0.2:  # More lenient threshold
-            raw_score *= 0.4  # Less severe penalty
-        elif len_ratio < 0.6:  # More lenient threshold
-            raw_score *= (0.8 + 0.2 * len_ratio)  # Less severe penalty
+        # Apply coverage penalty first - this is most important
+        # But be more lenient - good segments should boost score even with lower coverage
+        if coverage_ratio < 0.1:  # Very low coverage still gets heavy penalty
+            raw_score *= 0.2  # But not as severe as before
+        elif coverage_ratio < 0.3:  # Low coverage gets moderate penalty
+            raw_score *= 0.6 + (coverage_ratio * 1.2)  # Linear scaling from 0.6 to 0.96
+        elif coverage_ratio < 0.7:  # Moderate coverage gets very mild penalty
+            raw_score *= 0.92 + (coverage_ratio * 0.08)  # Linear scaling from 0.92 to 0.98
             
-        if coverage_ratio < 0.2:  # More lenient threshold
-            raw_score *= 0.4  # Less severe penalty
-        elif coverage_ratio < 0.6:  # More lenient threshold
-            raw_score *= (0.8 + 0.2 * coverage_ratio)  # Less severe penalty
+        # Apply length ratio penalty second - be more lenient
+        # Different lengths are ok as long as the matching segments are good
+        if len_ratio < 0.2:  # Very different lengths get mild penalty
+            raw_score *= 0.85 + len_ratio  # Linear scaling from 0.85 to 1.05
+        elif len_ratio < 0.5:  # Somewhat different lengths get very mild penalty
+            raw_score *= 0.96 + (len_ratio * 0.08)  # Linear scaling from 0.96 to 1.0
             
-        # Progressive boosting for high scores with adjusted thresholds
-        if raw_score > 60:  # Lower threshold for boosting
-            quality = (len_ratio + coverage_ratio) / 2  # Average of both ratios
-            max_boost = 1.0 + 0.7 * quality  # Higher maximum boost
-            boost = min(max_boost, 1.0 + (raw_score - 60) / 20 * quality)
-            score = 60 + (raw_score - 60) * boost
-        else:
-            score = raw_score
+        # Add a boost for high raw scores - if segments match well, be more forgiving
+        if raw_score > 65:  # Lower threshold for boost
+            boost = min(1.25, 1.0 + (raw_score - 65) / 80)  # Max 25% boost
+            raw_score *= boost
             
-        score = min(100, score)
+        # Log final analysis
+        logging.info(f"Segment analysis - Length ratio: {len_ratio:.2f}, Coverage: {coverage_ratio:.2f}, Raw score: {raw_score:.2f}, Final: {raw_score:.2f}")
         
-        logging.info(f"Segment analysis - Length ratio: {len_ratio:.2f}, Coverage: {coverage_ratio:.2f}, Raw score: {raw_score:.2f}, Final: {score:.2f}")
-        
-        # Store detection if score is good
-        if score > 50:
-            self.detections = [{
-                "reference_time": 0.0,
-                "input_time": 0.0,
-                "score": score
-            }]
-        else:
-            self.detections = []
-            
-        return score
+        return min(100, raw_score)  # Cap at 100
 
     def get_detections(self) -> List[Dict[str, float]]:
         """Get list of detected note matches"""
