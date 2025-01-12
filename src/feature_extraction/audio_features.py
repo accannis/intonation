@@ -60,6 +60,7 @@ class AudioFeatureExtractor:
         
     def extract_features(self, audio_data: Union[str, np.ndarray], include_waveform: bool = False) -> Optional[Dict[str, np.ndarray]]:
         """Extract features from audio data or file"""
+        logging.info(f"Extracting features for {audio_data}")
         try:
             # Load audio data if path provided
             if isinstance(audio_data, str):
@@ -76,12 +77,14 @@ class AudioFeatureExtractor:
                 
                 # Load audio file
                 logging.info(f"Loading audio file: {audio_data}")
-                audio_data, _ = librosa.load(audio_data, sr=self.sample_rate, duration=30.0)  # Only load first 30 seconds for testing
+                waveform, _ = librosa.load(audio_data, sr=self.sample_rate, duration=30.0)  # Only load first 30 seconds for testing
+            else:
+                waveform = audio_data
             
-            # Extract melody features (pitch contour)
+            # Extract pitch features
             logging.info("Extracting pitch features...")
             f0, voiced_flag, voiced_probs = librosa.pyin(
-                audio_data, 
+                waveform, 
                 sr=self.sample_rate,
                 fmin=self.f0_min,
                 fmax=self.f0_max
@@ -91,7 +94,7 @@ class AudioFeatureExtractor:
             # Extract MFCC features
             logging.info("Extracting MFCC features...")
             mel_spec = librosa.feature.melspectrogram(
-                y=audio_data,
+                y=waveform,
                 sr=self.sample_rate,
                 n_mels=self.n_mels,
                 hop_length=self.hop_length,
@@ -120,68 +123,15 @@ class AudioFeatureExtractor:
             features = {
                 'melody': np.column_stack([f0, voiced_probs]),
                 'phonetic': mfcc_features,
-                'duration': float(len(audio_data) / self.sample_rate)
+                'duration': float(len(waveform) / self.sample_rate)
             }
             
             # Cache features if we loaded from file
+            logging.info(f"audio_data is of type: {type(audio_data)}")
             if isinstance(audio_data, str):
-                logging.info(f"Caching features for {os.path.basename(audio_path)}")
+                logging.info(f"Attempting to cache features for {os.path.basename(audio_path)}")
                 self.cache.cache_features(audio_path, self.parameters, features)
-            
-            return features
-            
-        except Exception as e:
-            logging.error(f"Error extracting features: {e}")
-            logging.exception("Full traceback:")
-            return None
-
-    def extract_features_from_file(self, audio_file: str) -> Optional[Dict[str, np.ndarray]]:
-        """Extract all features from an audio file"""
-        try:
-            logging.info(f"Loading audio file: {audio_file}")
-            y, sr = librosa.load(audio_file, sr=self.sample_rate)
-            
-            # Extract pitch features
-            f0, voiced_flag, voiced_probs = librosa.pyin(
-                y,
-                sr=sr,
-                fmin=self.f0_min,
-                fmax=self.f0_max
-            )
-            
-            # Extract MFCC features
-            S = librosa.feature.melspectrogram(
-                y=y,
-                sr=sr,
-                n_mels=self.n_mels,
-                n_fft=self.n_fft,
-                hop_length=self.hop_length,
-                power=self.mel_power
-            )
-            
-            # Convert to log scale
-            log_S = librosa.power_to_db(S, ref=np.max, top_db=self.top_db)
-            
-            # Extract MFCCs
-            mfcc = librosa.feature.mfcc(
-                S=log_S,
-                n_mfcc=self.n_mfcc,
-                lifter=self.lifter
-            )
-            
-            # Add deltas
-            mfcc_delta = librosa.feature.delta(mfcc, width=self.delta_width)
-            mfcc_delta2 = librosa.feature.delta(mfcc, order=2, width=self.delta_width)
-            
-            # Stack MFCCs and deltas
-            mfcc_features = np.vstack([mfcc, mfcc_delta, mfcc_delta2])
-            
-            # Prepare features dict
-            features = {
-                'melody': np.column_stack([f0, voiced_probs]),
-                'phonetic': mfcc_features,
-                'duration': float(len(y) / sr)
-            }
+                logging.info(f"Caching features for {os.path.basename(audio_path)}")
             
             return features
             

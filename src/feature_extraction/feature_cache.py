@@ -12,6 +12,9 @@ import time
 
 from src.utils.cache_manager import CacheManager
 
+# Global instance
+_feature_cache = None
+
 class FeatureCache:
     def __init__(self):
         self.cache_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
@@ -20,7 +23,16 @@ class FeatureCache:
         os.makedirs(self.cache_dir, exist_ok=True)
         
         # Initialize index
-        self.index = {}
+        self.index_path = os.path.join(self.cache_dir, "cache_index.json")
+        if os.path.exists(self.index_path):
+            try:
+                with open(self.index_path, 'r') as f:
+                    self.index = json.load(f)
+            except Exception as e:
+                logging.error(f"Error loading cache index: {e}")
+                self.index = {}
+        else:
+            self.index = {}
         
         # 2GB limit for features cache (about 20 songs)
         self.cache_manager = CacheManager(self.cache_dir, max_files=20, max_size_gb=2.0, max_age_days=90)
@@ -97,9 +109,10 @@ class FeatureCache:
             # Check if features exist in cache
             cache_file = os.path.join(self.cache_dir, f"{cache_key}.npz")
             if not os.path.exists(cache_file):
-                logging.debug(f"No cached features found for {os.path.basename(abs_path)}")
+                logging.info(f"Cache miss for {os.path.basename(abs_path)} with key {cache_key}")
                 return None
-                
+            logging.info(f"Cache hit for {os.path.basename(abs_path)} with key {cache_key}")
+            
             # Load features from cache
             logging.debug(f"Loading cached features from {cache_file}")
             with np.load(cache_file) as data:
@@ -130,9 +143,12 @@ class FeatureCache:
             # Compute cache key
             cache_key = self._compute_cache_key(abs_path, parameters)
             
+            logging.info(f"Saving features to cache with key {cache_key}")
             # Save features to cache
             cache_file = os.path.join(self.cache_dir, f"{cache_key}.npz")
+            logging.info(f"Cache file path: {cache_file}")
             np.savez_compressed(cache_file, **features)
+            logging.info(f"Features saved to {cache_file}")
             
             # Update cache index
             self.index[cache_key] = {
@@ -151,6 +167,8 @@ class FeatureCache:
         except Exception as e:
             logging.error(f"Error caching features: {e}")
             logging.exception("Full traceback:")
+            logging.error(f"Error caching features: {e}")
+            logging.exception("Full traceback:")
             return False
 
     def clear_cache(self):
@@ -158,8 +176,11 @@ class FeatureCache:
         try:
             if os.path.exists(self.cache_dir):
                 for file in os.listdir(self.cache_dir):
-                    if file.endswith('.npy'):
+                    if file.endswith('.npz'):
                         os.remove(os.path.join(self.cache_dir, file))
+            self.index = {}
+            if os.path.exists(self.index_path):
+                os.remove(self.index_path)
             logging.info("Feature cache cleared")
         except Exception as e:
             logging.error(f"Error clearing cache: {e}")

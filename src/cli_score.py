@@ -69,6 +69,7 @@ def score_audio(reference_file: str, input_file: str, *, score_melody: bool = Tr
         }
         
         feature_extractor = AudioFeatureExtractor(feature_config)
+        
         melody_matcher = MelodyMatcher(melody_config) if score_melody else None
         phonetic_matcher = PhoneticMatcher(
             window_size=phonetic_config["dtw_window_size"],

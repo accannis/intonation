@@ -42,6 +42,24 @@ def main():
     print("\nRunning scoring tests...")
     print("=" * 80)
 
+    # Initialize components with default configs
+    feature_config = {
+        "sample_rate": 44100,
+        "hop_length": 512,
+        "n_mels": 128,
+        "n_mfcc": 20,
+        "n_fft": 2048,
+        "mel_power": 2.0,
+        "lifter": 22,
+        "top_db": 80,
+        "f0_min": 65.406391325149666,  # C2
+        "f0_max": 2093.004522404789,   # C7
+        "delta_width": 9,
+        "feature_version": 1
+    }
+
+    feature_extractor = AudioFeatureExtractor(feature_config)
+
     # Test cases
     test_cases = [
         {

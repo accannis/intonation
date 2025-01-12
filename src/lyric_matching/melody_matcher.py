@@ -17,6 +17,7 @@ class MelodyMatcher:
         self.min_voiced_frames = 100  # Reduced from 200 - at least 5 seconds of voiced frames
         self.min_voiced_ratio = 0.2  # Reduced from 0.3 - at least 20% of frames should be voiced
         self.detections = []
+        self.min_segment_score = 0.4  # Minimum score for a segment match
         
     def normalize_pitch(self, pitch: float) -> float:
         """Normalize pitch to be in a single octave (between 0 and 12 semitones)"""
@@ -278,7 +279,7 @@ class MelodyMatcher:
                 
                 # Calculate correlation
                 try:
-                    corr = np.corrcoef(ref_window, input_window)[0, 1]
+                    corr = np.corrcoef(ref_window, input_window)[0,1]
                     if np.isnan(corr):
                         corr = 0
                 except:
@@ -303,81 +304,494 @@ class MelodyMatcher:
         else:
             return 0.0
 
-    def analyze_chunk(self, ref_chunk: np.ndarray, input_chunk: np.ndarray) -> float:
-        """Analyze similarity between two chunks of melody
+    def analyze_subsequence(self, ref_seq: np.ndarray, input_seq: np.ndarray) -> float:
+        """Analyze similarity between two melody subsequences
         
         Args:
-            ref_chunk: Reference chunk pitch sequence
-            input_chunk: Input chunk pitch sequence
+            ref_seq: Reference subsequence pitch sequence
+            input_seq: Input subsequence pitch sequence
             
         Returns:
             Score between 0 and 100 indicating similarity
         """
-        # Normalize chunks to zero mean and unit variance
-        ref_mean = np.mean(ref_chunk)
-        ref_std = np.std(ref_chunk)
-        input_mean = np.mean(input_chunk)
-        input_std = np.std(input_chunk)
+        # Normalize sequences
+        ref_mean = np.mean(ref_seq)
+        ref_std = np.std(ref_seq)
+        input_mean = np.mean(input_seq)
+        input_std = np.std(input_seq)
         
         if ref_std > 0:
-            ref_chunk = (ref_chunk - ref_mean) / ref_std
+            ref_seq = (ref_seq - ref_mean) / ref_std
         if input_std > 0:
-            input_chunk = (input_chunk - input_mean) / input_std
+            input_seq = (input_seq - input_mean) / input_std
             
-        # Calculate DTW with strict penalty
-        N, M = len(ref_chunk), len(input_chunk)
+        # Calculate DTW score
+        N, M = len(ref_seq), len(input_seq)
         cost = np.zeros((N + 1, M + 1))
         cost[0, 1:] = np.inf
         cost[1:, 0] = np.inf
         
         for i in range(1, N + 1):
             for j in range(1, M + 1):
-                diff = abs(ref_chunk[i-1] - input_chunk[j-1])
-                diff_cost = min(100, diff * 8)  # Strict penalty
+                diff = abs(ref_seq[i-1] - input_seq[j-1])
+                diff_cost = min(100, diff * 12)  # Higher penalty for pitch differences
                 
                 cost[i, j] = diff_cost + min(
-                    cost[i-1, j],
-                    cost[i, j-1],
-                    cost[i-1, j-1]
+                    cost[i-1, j-1],     # Match
+                    cost[i-1, j] + 3,     # Gap penalties
+                    cost[i, j-1] + 3
                 )
                 
-        # Get final cost and normalize
         final_cost = cost[N, M]
         path_length = N + M
         avg_cost = final_cost / path_length
         dtw_score = max(0, 100 - avg_cost)
         
-        # Calculate correlation
-        try:
-            corr = np.corrcoef(ref_chunk, input_chunk)[0, 1]
-            if np.isnan(corr):
-                corr = 0
-        except:
-            corr = 0
-            
         # Calculate contour similarity
-        ref_contour = np.diff(ref_chunk)
-        input_contour = np.diff(input_chunk)
+        ref_contour = np.diff(ref_seq)
+        input_contour = np.diff(input_seq)
         ref_contour = np.sign(ref_contour)
         input_contour = np.sign(input_contour)
         
         if len(ref_contour) > 0 and len(input_contour) > 0:
             min_len = min(len(ref_contour), len(input_contour))
             contour_match = np.mean(ref_contour[:min_len] == input_contour[:min_len])
+            
+            # Weight direction changes more heavily
+            ref_changes = np.where(np.diff(ref_contour[:min_len]) != 0)[0]
+            input_changes = np.where(np.diff(input_contour[:min_len]) != 0)[0]
+            if len(ref_changes) > 0 and len(input_changes) > 0:
+                changes_match = np.mean(np.abs(ref_changes - input_changes[:, None]) <= 2)
+                contour_match = 0.7 * contour_match + 0.3 * changes_match
         else:
             contour_match = 0
             
+        # Calculate correlation
+        try:
+            corr = np.corrcoef(ref_seq, input_seq)[0, 1]
+            if np.isnan(corr):
+                corr = 0
+        except:
+            corr = 0
+            
         # Combine scores
-        chunk_score = (
-            0.6 * dtw_score +  # DTW is most important
-            0.2 * max(0, corr * 100) +  # Correlation
-            0.2 * contour_match * 100  # Contour
+        return (
+            0.5 * dtw_score +
+            0.3 * contour_match * 100 +
+            0.2 * max(0, corr * 100)
         )
+
+    def align_sequences(self, ref_seq: np.ndarray, input_seq: np.ndarray) -> tuple:
+        """Align two sequences using DTW and return aligned subsequences
         
-        return chunk_score
+        Args:
+            ref_seq: Reference sequence
+            input_seq: Input sequence
+            
+        Returns:
+            Tuple of (aligned reference, aligned input, alignment score)
+        """
+        # Normalize sequences
+        ref_mean = np.mean(ref_seq)
+        ref_std = np.std(ref_seq)
+        input_mean = np.mean(input_seq)
+        input_std = np.std(input_seq)
+        
+        if ref_std > 0:
+            ref_seq = (ref_seq - ref_mean) / ref_std
+        if input_std > 0:
+            input_seq = (input_seq - input_mean) / input_std
+            
+        # Calculate DTW matrix
+        N, M = len(ref_seq), len(input_seq)
+        cost = np.zeros((N + 1, M + 1))
+        cost[0, 1:] = np.inf
+        cost[1:, 0] = np.inf
+        
+        # Track path
+        path = np.zeros((N + 1, M + 1, 2), dtype=int)
+        
+        for i in range(1, N + 1):
+            for j in range(1, M + 1):
+                diff = abs(ref_seq[i-1] - input_seq[j-1])
+                diff_cost = min(100, diff * 10)
+                
+                choices = [
+                    (cost[i-1, j-1], (-1, -1)),  # Match
+                    (cost[i-1, j] + 3, (-1, 0)),  # Gap penalties
+                    (cost[i, j-1] + 3, (0, -1))   # Gap penalties
+                ]
+                
+                best_cost, best_step = min(choices, key=lambda x: x[0])
+                cost[i, j] = diff_cost + best_cost
+                path[i, j] = best_step
+                
+        # Backtrack to find alignment
+        i, j = N, M
+        ref_aligned = []
+        input_aligned = []
+        path_cost = 0
+        path_length = 0
+        
+        while i > 0 and j > 0:
+            di, dj = path[i, j]
+            if di == -1 and dj == -1:  # Match
+                ref_aligned.append(ref_seq[i-1])
+                input_aligned.append(input_seq[j-1])
+                diff = abs(ref_seq[i-1] - input_seq[j-1])
+                path_cost += min(100, diff * 10)
+                path_length += 1
+            elif di == -1:  # Gap in input
+                ref_aligned.append(ref_seq[i-1])
+                input_aligned.append(0)  # Gap
+                path_cost += 3
+                path_length += 1
+            else:  # Gap in reference
+                ref_aligned.append(0)  # Gap
+                input_aligned.append(input_seq[j-1])
+                path_cost += 3
+                path_length += 1
+            i += di
+            j += dj
+            
+        # Reverse sequences
+        ref_aligned = np.array(ref_aligned[::-1])
+        input_aligned = np.array(input_aligned[::-1])
+        
+        # Calculate alignment score
+        avg_cost = path_cost / path_length if path_length > 0 else 100
+        alignment_score = max(0, 100 - avg_cost)
+        
+        return ref_aligned, input_aligned, alignment_score
+
+    def score_aligned_sequences(self, ref_aligned: np.ndarray, input_aligned: np.ndarray) -> float:
+        """Score aligned sequences based on various metrics
+        
+        Args:
+            ref_aligned: Aligned reference sequence
+            input_aligned: Aligned input sequence
+            
+        Returns:
+            Score between 0 and 100
+        """
+        # Remove gaps for contour analysis
+        ref_valid = ref_aligned != 0
+        input_valid = input_aligned != 0
+        valid_mask = ref_valid & input_valid
+        
+        if not np.any(valid_mask):
+            return 0.0
+            
+        ref_seq = ref_aligned[valid_mask]
+        input_seq = input_aligned[valid_mask]
+        
+        # Calculate contour similarity
+        ref_contour = np.diff(ref_seq)
+        input_contour = np.diff(input_seq)
+        ref_contour = np.sign(ref_contour)
+        input_contour = np.sign(input_contour)
+        
+        if len(ref_contour) > 0 and len(input_contour) > 0:
+            contour_match = np.mean(ref_contour == input_contour)
+            
+            # Weight direction changes more heavily
+            ref_changes = np.where(np.diff(ref_contour) != 0)[0]
+            input_changes = np.where(np.diff(input_contour) != 0)[0]
+            if len(ref_changes) > 0 and len(input_changes) > 0:
+                changes_match = np.mean(np.abs(ref_changes - input_changes[:, None]) <= 2)
+                contour_match = 0.7 * contour_match + 0.3 * changes_match
+        else:
+            contour_match = 0
+            
+        # Calculate correlation
+        try:
+            corr = np.corrcoef(ref_seq, input_seq)[0, 1]
+            if np.isnan(corr):
+                corr = 0
+        except:
+            corr = 0
+            
+        # Calculate gap ratio
+        gap_ratio = np.mean(valid_mask)
+        
+        return (
+            0.4 * contour_match * 100 +
+            0.3 * max(0, corr * 100) +
+            0.3 * gap_ratio * 100
+        )
+
+    def find_matching_segments(self, ref_pitch: np.ndarray, input_pitch: np.ndarray) -> List[Tuple[int, int, int, int, float]]:
+        """Find matching segments between reference and input pitch sequences
+        
+        Args:
+            ref_pitch: Reference pitch sequence
+            input_pitch: Input pitch sequence
+            
+        Returns:
+            List of tuples (ref_start, ref_end, input_start, input_end, match_score)
+        """
+        matches = []
+        min_segment_len = 10  # Minimum segment length
+        max_segment_len = 100  # Maximum segment length
+        step_size = 5  # Step size for sliding window
+        
+        # Calculate overall pitch statistics
+        ref_mean = np.mean(ref_pitch)
+        ref_std = np.std(ref_pitch)
+        input_mean = np.mean(input_pitch)
+        input_std = np.std(input_pitch)
+        
+        # Calculate overall pitch difference
+        overall_pitch_diff = abs(ref_mean - input_mean) / ref_mean if ref_mean > 0 else float('inf')
+        
+        # If overall pitch difference is too large, return no matches
+        if overall_pitch_diff > 1.0:  # More than 100% difference in average pitch
+            return []
+            
+        for segment_len in range(min_segment_len, max_segment_len + 1, step_size):
+            # Slide window over reference sequence
+            for ref_start in range(0, len(ref_pitch) - segment_len + 1, step_size):
+                ref_end = ref_start + segment_len
+                ref_segment = ref_pitch[ref_start:ref_end]
+                
+                # Normalize reference segment
+                ref_mean = np.mean(ref_segment)
+                ref_std = np.std(ref_segment)
+                if ref_std == 0:
+                    continue
+                ref_norm = (ref_segment - ref_mean) / ref_std
+                
+                # Calculate reference contour
+                ref_contour = np.diff(ref_norm)
+                ref_contour_pattern = np.sign(ref_contour)
+                
+                # Slide window over input sequence
+                best_match = None
+                best_score = -1
+                
+                for input_start in range(0, len(input_pitch) - segment_len + 1, step_size):
+                    input_end = input_start + segment_len
+                    input_segment = input_pitch[input_start:input_end]
+                    
+                    # Normalize input segment
+                    input_mean = np.mean(input_segment)
+                    input_std = np.std(input_segment)
+                    if input_std == 0:
+                        continue
+                    input_norm = (input_segment - input_mean) / input_std
+                    
+                    # Calculate correlation
+                    corr = np.corrcoef(ref_norm, input_norm)[0, 1]
+                    if np.isnan(corr):
+                        continue
+                        
+                    # Calculate pitch difference penalty
+                    pitch_diff = abs(ref_mean - input_mean) / ref_mean
+                    pitch_penalty = max(0, 1 - pitch_diff * 2)
+                    
+                    # Calculate contour match
+                    input_contour = np.diff(input_norm)
+                    input_contour_pattern = np.sign(input_contour)
+                    contour_match = np.mean(ref_contour_pattern == input_contour_pattern)
+                    
+                    # Calculate contour correlation
+                    contour_corr = np.corrcoef(ref_contour, input_contour)[0, 1]
+                    if np.isnan(contour_corr):
+                        contour_corr = 0
+                        
+                    # Calculate rhythm match
+                    rhythm_match = 1.0 - abs(ref_std - input_std) / max(ref_std, input_std)
+                    
+                    # Combine scores with stricter criteria
+                    match_score = (
+                        0.3 * max(0, corr) +  # Base correlation
+                        0.3 * contour_match +  # Contour direction match
+                        0.2 * max(0, contour_corr) +  # Contour shape correlation
+                        0.1 * pitch_penalty +  # Pitch difference penalty
+                        0.1 * rhythm_match  # Rhythm similarity
+                    )
+                    
+                    # Apply minimum thresholds
+                    if (corr < 0.2 or  # Minimum correlation
+                        contour_match < 0.3 or  # Minimum contour match
+                        pitch_penalty < 0.2):  # Maximum pitch difference
+                        continue
+                        
+                    # Update best match
+                    if match_score > best_score and match_score > self.min_segment_score:
+                        best_score = match_score
+                        best_match = (ref_start, ref_end, input_start, input_end, match_score)
+                
+                if best_match is not None:
+                    matches.append(best_match)
+        
+        # Filter overlapping matches
+        filtered_matches = []
+        for match in sorted(matches, key=lambda x: x[4], reverse=True):  # Sort by score
+            ref_start, ref_end, input_start, input_end, score = match
+            
+            # Check for significant overlap with existing matches
+            overlap = False
+            for existing in filtered_matches:
+                ref_s, ref_e, in_s, in_e, _ = existing
+                
+                # Calculate overlap ratios
+                ref_overlap = min(ref_end, ref_e) - max(ref_start, ref_s)
+                input_overlap = min(input_end, in_e) - max(input_start, in_s)
+                
+                if ref_overlap > 0 and input_overlap > 0:
+                    ref_ratio = ref_overlap / (ref_end - ref_start)
+                    input_ratio = input_overlap / (input_end - input_start)
+                    if ref_ratio > 0.3 or input_ratio > 0.3:  # Allow some overlap
+                        overlap = True
+                        break
+            
+            if not overlap:
+                filtered_matches.append(match)
+        
+        return filtered_matches
+
+    def align_segment(self, ref_seq: np.ndarray, input_seq: np.ndarray) -> tuple:
+        """Align two segments using DTW with strict penalties
+        
+        Args:
+            ref_seq: Reference segment
+            input_seq: Input segment
+            
+        Returns:
+            Tuple of (aligned reference, aligned input, alignment score)
+        """
+        # Normalize sequences
+        ref_mean = np.mean(ref_seq)
+        ref_std = np.std(ref_seq)
+        input_mean = np.mean(input_seq)
+        input_std = np.std(input_seq)
+        
+        if ref_std > 0:
+            ref_seq = (ref_seq - ref_mean) / ref_std
+        if input_std > 0:
+            input_seq = (input_seq - input_mean) / input_std
+            
+        # Calculate DTW matrix with strict penalties
+        N, M = len(ref_seq), len(input_seq)
+        cost = np.zeros((N + 1, M + 1))
+        cost[0, 1:] = np.inf
+        cost[1:, 0] = np.inf
+        
+        # Track path
+        path = np.zeros((N + 1, M + 1, 2), dtype=int)
+        
+        for i in range(1, N + 1):
+            for j in range(1, M + 1):
+                diff = abs(ref_seq[i-1] - input_seq[j-1])
+                diff_cost = min(100, diff * 10)  # Less strict pitch difference penalty
+                
+                choices = [
+                    (cost[i-1, j-1], (-1, -1)),  # Match
+                    (cost[i-1, j] + 5, (-1, 0)),  # Lower gap penalty
+                    (cost[i, j-1] + 5, (0, -1))   # Lower gap penalty
+                ]
+                
+                best_cost, best_step = min(choices, key=lambda x: x[0])
+                cost[i, j] = diff_cost + best_cost
+                path[i, j] = best_step
+                
+        # Backtrack to find alignment
+        i, j = N, M
+        ref_aligned = []
+        input_aligned = []
+        path_cost = 0
+        path_length = 0
+        
+        while i > 0 and j > 0:
+            di, dj = path[i, j]
+            if di == -1 and dj == -1:  # Match
+                ref_aligned.append(ref_seq[i-1])
+                input_aligned.append(input_seq[j-1])
+                diff = abs(ref_seq[i-1] - input_seq[j-1])
+                path_cost += min(100, diff * 10)
+                path_length += 1
+            elif di == -1:  # Gap in input
+                ref_aligned.append(ref_seq[i-1])
+                input_aligned.append(0)  # Gap
+                path_cost += 5
+                path_length += 1
+            else:  # Gap in reference
+                ref_aligned.append(0)  # Gap
+                input_aligned.append(input_seq[j-1])
+                path_cost += 5
+                path_length += 1
+            i += di
+            j += dj
+            
+        # Reverse sequences
+        ref_aligned = np.array(ref_aligned[::-1])
+        input_aligned = np.array(input_aligned[::-1])
+        
+        # Calculate alignment score
+        avg_cost = path_cost / path_length if path_length > 0 else 100
+        alignment_score = max(0, 100 - avg_cost)
+        
+        return ref_aligned, input_aligned, alignment_score
+
+    def score_aligned_segment(self, ref_aligned: np.ndarray, input_aligned: np.ndarray) -> float:
+        """Score aligned segment based on various metrics
+        
+        Args:
+            ref_aligned: Aligned reference segment
+            input_aligned: Aligned input segment
+            
+        Returns:
+            Score between 0 and 100
+        """
+        # Remove gaps for contour analysis
+        ref_valid = ref_aligned != 0
+        input_valid = input_aligned != 0
+        valid_mask = ref_valid & input_valid
+        
+        if not np.any(valid_mask):
+            return 0.0
+            
+        ref_seq = ref_aligned[valid_mask]
+        input_seq = input_aligned[valid_mask]
+        
+        # Calculate contour similarity
+        ref_contour = np.diff(ref_seq)
+        input_contour = np.diff(input_seq)
+        ref_contour = np.sign(ref_contour)
+        input_contour = np.sign(input_contour)
+        
+        if len(ref_contour) > 0 and len(input_contour) > 0:
+            contour_match = np.mean(ref_contour == input_contour)
+            
+            # Weight direction changes more heavily
+            ref_changes = np.where(np.diff(ref_contour) != 0)[0]
+            input_changes = np.where(np.diff(input_contour) != 0)[0]
+            if len(ref_changes) > 0 and len(input_changes) > 0:
+                changes_match = np.mean(np.abs(ref_changes - input_changes[:, None]) <= 3)  # More lenient timing
+                contour_match = 0.6 * contour_match + 0.4 * changes_match  # Weight changes more
+        else:
+            contour_match = 0
+            
+        # Calculate correlation
+        try:
+            corr = np.corrcoef(ref_seq, input_seq)[0, 1]
+            if np.isnan(corr):
+                corr = 0
+        except:
+            corr = 0
+            
+        # Calculate gap ratio
+        gap_ratio = np.mean(valid_mask)
+        
+        return (
+            0.4 * contour_match * 100 +
+            0.3 * max(0, corr * 100) +
+            0.3 * gap_ratio * 100
+        )
 
     def match_melody(self, reference: np.ndarray, input_melody: np.ndarray) -> float:
-        """Match input melody against reference melody using chunked analysis
+        """Match input melody against reference melody using segment-based DTW alignment
         
         Args:
             reference: Reference melody features (N x 2 array of pitch and confidence)
@@ -423,53 +837,80 @@ class MelodyMatcher:
         ref_pitch = ref_pitch[ref_voiced]
         input_pitch = input_pitch[input_voiced]
         
-        # Define chunk parameters
-        chunk_size = 50  # frames
-        chunk_overlap = 25  # frames
+        # Calculate length ratio
+        len_ratio = min(len(ref_pitch), len(input_pitch)) / max(len(ref_pitch), len(input_pitch))
         
-        # Initialize chunk scores
-        chunk_scores = []
-        chunk_weights = []
+        # Find matching segments
+        matches = self.find_matching_segments(ref_pitch, input_pitch)
         
-        # Analyze reference chunks
-        for i in range(0, len(ref_pitch) - chunk_size + 1, chunk_overlap):
-            ref_chunk = ref_pitch[i:i + chunk_size]
+        if not matches:
+            return 0.0
             
-            # Find best matching chunk in input
-            best_score = 0
-            for j in range(0, len(input_pitch) - chunk_size + 1, chunk_overlap // 2):
-                input_chunk = input_pitch[j:j + chunk_size]
-                score = self.analyze_chunk(ref_chunk, input_chunk)
-                best_score = max(best_score, score)
-                
-            # Weight by chunk position (later chunks weighted more)
-            weight = 0.5 + 0.5 * (i / len(ref_pitch))
+        # Score each matching segment
+        segment_scores = []
+        covered_ref_frames = set()  # Track which reference frames are covered
+        
+        for ref_start, ref_end, input_start, input_end, match_score in matches:
+            # Get segments
+            ref_segment = ref_pitch[ref_start:ref_end + 1]
+            input_segment = input_pitch[input_start:input_end + 1]
             
-            chunk_scores.append(best_score)
-            chunk_weights.append(weight)
+            # Add reference frames to covered set
+            covered_ref_frames.update(range(ref_start, ref_end + 1))
             
-        if not chunk_scores:
+            # Align segments
+            ref_aligned, input_aligned, alignment_score = self.align_segment(ref_segment, input_segment)
+            
+            # Score aligned segments
+            sequence_score = self.score_aligned_segment(ref_aligned, input_aligned)
+            
+            # Combine scores with adjusted weights
+            segment_score = (
+                0.5 * match_score * 100 +  # Increased weight for match quality
+                0.3 * alignment_score +
+                0.2 * sequence_score
+            )
+            
+            # Weight by segment length
+            weight = len(ref_segment) / len(ref_pitch)
+            segment_scores.append((segment_score, weight))
+            
+        if not segment_scores:
             return 0.0
             
         # Calculate weighted average score
-        chunk_scores = np.array(chunk_scores)
-        chunk_weights = np.array(chunk_weights)
-        
-        # Get overall statistics
-        mean_score = np.average(chunk_scores, weights=chunk_weights)
-        top_score = np.max(chunk_scores)
-        
-        # Calculate final score with emphasis on best matches
-        score = 0.7 * top_score + 0.3 * mean_score
-        
-        # Boost high scores
-        if score > 60:  # Start boosting earlier for good matches
-            boost = min(2.0, 1.0 + (score - 60) / 20)  # Progressive boost
-            score = 60 + (score - 60) * boost
+        total_weight = sum(weight for _, weight in segment_scores)
+        if total_weight > 0:
+            raw_score = sum(score * weight for score, weight in segment_scores) / total_weight
+        else:
+            raw_score = 0
             
-        score = min(100, score)  # Cap at 100
+        # Calculate coverage ratio using unique covered frames
+        coverage_ratio = len(covered_ref_frames) / len(ref_pitch)
         
-        logging.info(f"Chunk analysis - Mean: {mean_score:.2f}, Top: {top_score:.2f}, Final: {score:.2f}")
+        # Apply length and coverage penalties with adjusted thresholds
+        if len_ratio < 0.2:  # More lenient threshold
+            raw_score *= 0.4  # Less severe penalty
+        elif len_ratio < 0.6:  # More lenient threshold
+            raw_score *= (0.8 + 0.2 * len_ratio)  # Less severe penalty
+            
+        if coverage_ratio < 0.2:  # More lenient threshold
+            raw_score *= 0.4  # Less severe penalty
+        elif coverage_ratio < 0.6:  # More lenient threshold
+            raw_score *= (0.8 + 0.2 * coverage_ratio)  # Less severe penalty
+            
+        # Progressive boosting for high scores with adjusted thresholds
+        if raw_score > 60:  # Lower threshold for boosting
+            quality = (len_ratio + coverage_ratio) / 2  # Average of both ratios
+            max_boost = 1.0 + 0.7 * quality  # Higher maximum boost
+            boost = min(max_boost, 1.0 + (raw_score - 60) / 20 * quality)
+            score = 60 + (raw_score - 60) * boost
+        else:
+            score = raw_score
+            
+        score = min(100, score)
+        
+        logging.info(f"Segment analysis - Length ratio: {len_ratio:.2f}, Coverage: {coverage_ratio:.2f}, Raw score: {raw_score:.2f}, Final: {score:.2f}")
         
         # Store detection if score is good
         if score > 50:
